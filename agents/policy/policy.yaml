@@ -1,0 +1,52 @@
+# Sindarin policy (DDD §10.1). Agents draft from it; both executors enforce it.
+# Every id is a Switch participant id; nothing in this file is a display name.
+# `sindarin bootstrap` writes the ids and room ids. Learn yours with "@sindarin-switch whoami".
+version: 2
+
+groups:
+  pm: ["@switch-mattermost-2f2d15ce-de63-4dbf-9c7e-ca96f01b38cd-leonardo:localhost"]            # Leonardo
+  engineering: ["@switch-mattermost-2f2d15ce-de63-4dbf-9c7e-ca96f01b38cd-isaac:localhost"]            # Isaac
+  release: ["@switch-mattermost-2f2d15ce-de63-4dbf-9c7e-ca96f01b38cd-john:localhost"]            # John
+  # Vincent is in no group: used for refusals in the demo (§3.2)
+
+proposers:
+  product: "@switch-agent-ca7d6fcc:localhost"
+  coder: "@switch-agent-f58c91b6:localhost"
+  reviewer: "@switch-agent-88d97995:localhost"
+  release: "@switch-agent-b873dc53:localhost"
+
+executors:
+  sindarin-switch: "@switch-agent-99c39840:localhost"
+  sindarin-github: "@switch-agent-515b9070:localhost"
+
+rooms:
+  product: "e86bd099-0fab-4671-a25d-d84211b30b17"
+  releases: "c83ccbec-24a9-4052-b5cb-2bc6013f8097"
+  customer: "c383cfb1-4c52-4182-b055-00416be7a720"
+
+rules:
+  - name: spec
+    kind: spec
+    proposer: product
+    approvers: pm
+    room: product
+    allowed_repos: ["kartikangiras/sindarin-demo-app"]
+    engineers: engineering
+    pending_ttl: 24h
+  - name: merge
+    kind: pr
+    proposer: coder
+    approvers: engineering
+    room: feature            # the artifact's own feature room
+    repo: "kartikangiras/sindarin-demo-app"
+    base: main
+    merge_method: squash
+    pending_ttl: 24h
+  - name: release
+    kind: release
+    proposer: release
+    approvers: release
+    room: releases
+    repo: "kartikangiras/sindarin-demo-app"
+    tag_pattern: "^v\\d+\\.\\d+\\.\\d+$"
+    pending_ttl: 24h

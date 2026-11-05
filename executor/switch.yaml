@@ -1,0 +1,35 @@
+# sindarin-switch (DDD §7.2, §16.1). Owns SPEC-n and the board. Secrets live in switch.env, never here.
+# Room ids and participant ids are in agents/policy/policy.yaml; bootstrap writes both.
+executor: sindarin-switch
+room_names:
+  product: '#product'
+  releases: '#releases'
+  customer: '#acme-shared'
+self_id: '@switch-agent-99c39840:localhost'
+peer_ids:
+- '@switch-agent-515b9070:localhost'
+policy_path: ../agents/policy/policy.yaml
+users_path: ../agents/policy/users.yaml
+state_db: switch.db
+sweep_interval_seconds: 30
+retry_minutes: 60
+max_attempts: 2
+thread_replies: true
+post_audit_lines: false
+status_fences: false
+github_mode: real
+room_creation: gateway
+addressing: rooms
+bridge_id: 2f2d15ce-de63-4dbf-9c7e-ca96f01b38cd
+peer_state_db: github.db
+directory:
+  '@switch-agent-ca7d6fcc:localhost': a6238335-427e-42ac-ae73-1c7f1332c17c
+  '@switch-agent-f58c91b6:localhost': 6e88b49d-c75e-4f67-a8af-bb8da192b456
+  '@switch-agent-88d97995:localhost': 33fed34e-3ac3-4c66-bba2-378e394444dd
+  '@switch-agent-b873dc53:localhost': fffb2ffd-9e36-4e2e-b25a-4bbf34075106
+  '@switch-agent-99c39840:localhost': 045c61eb-0262-4f79-af57-aca715aa60d5
+  '@switch-agent-515b9070:localhost': 6599259f-94d1-416b-ae66-febb9ce7f59f
+  '@switch-mattermost-2f2d15ce-de63-4dbf-9c7e-ca96f01b38cd-isaac:localhost': isaac
+  '@switch-mattermost-2f2d15ce-de63-4dbf-9c7e-ca96f01b38cd-leonardo:localhost': leonardo
+  '@switch-mattermost-2f2d15ce-de63-4dbf-9c7e-ca96f01b38cd-john:localhost': john
+  '@switch-mattermost-2f2d15ce-de63-4dbf-9c7e-ca96f01b38cd-vincent:localhost': vincent

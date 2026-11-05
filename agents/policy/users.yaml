@@ -1,0 +1,9 @@
+# Participant id → display name and, for engineers, GitHub login (DDD §10.2).
+# Names are for reading; the login names the PR assignee and recognises a human PR author.
+# Never used for authorization. Written by `sindarin bootstrap`.
+version: 2
+users:
+  "@switch-mattermost-2f2d15ce-de63-4dbf-9c7e-ca96f01b38cd-isaac:localhost": { name: Isaac, github: isaac-gh }
+  "@switch-mattermost-2f2d15ce-de63-4dbf-9c7e-ca96f01b38cd-leonardo:localhost": { name: Leonardo }
+  "@switch-mattermost-2f2d15ce-de63-4dbf-9c7e-ca96f01b38cd-john:localhost": { name: John }
+  "@switch-mattermost-2f2d15ce-de63-4dbf-9c7e-ca96f01b38cd-vincent:localhost": { name: Vincent }

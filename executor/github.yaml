@@ -1,0 +1,25 @@
+# sindarin-github (DDD §7.1, §16.1). Owns PR-n and REL-n. Secrets live in github.env, never here.
+# github_mode: real (GITHUB_TOKEN in github.env) | simulated (in-memory, no token).
+executor: sindarin-github
+room_names:
+  product: '#product'
+  releases: '#releases'
+  customer: '#acme-shared'
+self_id: '@switch-agent-515b9070:localhost'
+peer_ids:
+- '@switch-agent-99c39840:localhost'
+policy_path: ../agents/policy/policy.yaml
+users_path: ../agents/policy/users.yaml
+state_db: github.db
+sweep_interval_seconds: 30
+retry_minutes: 60
+max_attempts: 2
+thread_replies: true
+post_audit_lines: false
+status_fences: false
+github_mode: simulated
+room_creation: gateway
+addressing: rooms
+bridge_id: ''
+peer_state_db: ''
+directory: {}
