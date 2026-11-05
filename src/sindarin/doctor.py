@@ -37,7 +37,12 @@ def run_doctor(repo: Path, stack_env: Path) -> list[Check]:
     if stack_env.exists():
         st = parse_env_text(stack_env.read_text())
         api = f"http://localhost:{st.get('API_HOST_PORT') or '8000'}"
-        mm = f"http://localhost:{st.get('MATTERMOST_HOST_PORT') or '8065'}"
+        from sindarin.bootstrap import MattermostTarget
+
+        try:
+            mm = MattermostTarget.resolve(repo, st).url
+        except ValueError:
+            mm = f"http://localhost:{st.get('MATTERMOST_HOST_PORT') or '8065'}"
         for name, url, fix in (
             ("switch", f"{api}/health", 'PROFILES="gateway collab" scripts/switch_stack.sh up'),
             (

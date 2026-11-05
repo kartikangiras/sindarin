@@ -221,6 +221,12 @@ def bootstrap(
     addressing: Annotated[
         str, typer.Option(help="rooms | open: Switch addressing policy for the six agents")
     ] = "rooms",
+    mattermost_env: Annotated[
+        Path | None,
+        typer.Option(
+            help="A Mattermost server of your own (default: executor/mattermost.env if present)"
+        ),
+    ] = None,
     repo_root: Annotated[Path | None, typer.Option(help="Repository root (default: auto)")] = None,
 ) -> None:
     """Register the six agents, create the four bridged rooms and the demo people, learn every
@@ -239,6 +245,7 @@ def bootstrap(
         write_ids=write_ids,
         github_mode=github,
         addressing=addressing,
+        mattermost_env=mattermost_env,
     )
     for line in rep.lines:
         print(line)

@@ -33,7 +33,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
 
-from sindarin.bootstrap import run_bootstrap  # noqa: E402
+from sindarin.bootstrap import MattermostTarget, run_bootstrap  # noqa: E402
 from sindarin.executor.config import load_env, parse_env_text  # noqa: E402
 from sindarin.names import GITHUB_EXECUTOR, SWITCH_EXECUTOR  # noqa: E402
 from sindarin.switch.gateway import GatewayClient, GatewayError  # noqa: E402
@@ -80,15 +80,29 @@ def main() -> int:
     p.add_argument("--api", default=None)
     p.add_argument("--demo-pass", default="Sindarin-demo-1")
     p.add_argument("--no-bootstrap", action="store_true")
+    p.add_argument(
+        "--mattermost-env",
+        type=Path,
+        default=None,
+        help="a Mattermost server of your own (default: executor/mattermost.env if present)",
+    )
     p.add_argument("--report", type=Path, default=REPO / "docs" / "SPIKE-RUN.md")
     a = p.parse_args()
     lines: list[str] = []
     ok = True
     stack = parse_env_text(a.stack_env.read_text())
     api = (a.api or f"http://localhost:{stack.get('API_HOST_PORT') or '8000'}").rstrip("/")
-    mm_url = f"http://localhost:{stack.get('MATTERMOST_HOST_PORT') or '8065'}"
+    target = MattermostTarget.resolve(REPO, stack, mattermost_env=a.mattermost_env)
+    mm_url = target.url
+    lines.append(f"mattermost: {mm_url} team {target.team_name}")
     if not a.no_bootstrap:
-        rep = run_bootstrap(REPO, a.stack_env, api_url=a.api, demo_pass=a.demo_pass)
+        rep = run_bootstrap(
+            REPO,
+            a.stack_env,
+            api_url=a.api,
+            demo_pass=a.demo_pass,
+            mattermost_env=a.mattermost_env,
+        )
         lines += [line if line.startswith("FAIL") else "PASS " + line for line in rep.lines]
         ok &= rep.ok
     sw = load_env(REPO / "executor" / "switch.env", env_override=False)
@@ -105,12 +119,8 @@ def main() -> int:
         ok = False
     else:
         try:
-            mm_admin = MattermostClient.login(
-                mm_url,
-                stack.get("MATTERMOST_ADMIN_USER", ""),
-                stack.get("MATTERMOST_ADMIN_PASSWORD", ""),
-            )
-            team = mm_admin.team_by_name(stack.get("MATTERMOST_TEAM_NAME") or "switch")["id"]
+            mm_admin = MattermostClient.login(mm_url, target.admin_user, target.admin_password)
+            team = mm_admin.team_by_name(target.team_name)["id"]
             isaac = MattermostClient.login(mm_url, "isaac@sindarin.local", a.demo_pass)
             ids: dict[str, str] = {}
             for handle, room_name in ((SWITCH_EXECUTOR, "product"), (GITHUB_EXECUTOR, "releases")):
@@ -192,12 +202,8 @@ def main() -> int:
             admin = GatewayClient.login(
                 api, stack.get("GATEWAY_ADMIN_EMAIL", ""), stack.get("GATEWAY_ADMIN_PASSWORD", "")
             )
-            mm_admin = MattermostClient.login(
-                mm_url,
-                stack.get("MATTERMOST_ADMIN_USER", ""),
-                stack.get("MATTERMOST_ADMIN_PASSWORD", ""),
-            )
-            team = mm_admin.team_by_name(stack.get("MATTERMOST_TEAM_NAME") or "switch")["id"]
+            mm_admin = MattermostClient.login(mm_url, target.admin_user, target.admin_password)
+            team = mm_admin.team_by_name(target.team_name)["id"]
             feat = next(
                 (
                     r

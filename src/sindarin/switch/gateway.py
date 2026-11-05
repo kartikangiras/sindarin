@@ -161,6 +161,27 @@ class GatewayClient:
             data = data.get("collaborations", data.get("items", data.get("bridges", [])))
         return list(data or [])
 
+    def create_bridge(
+        self, *, bridge_type: str, display_name: str, connection_config: dict[str, Any]
+    ) -> dict[str, Any]:
+        """`POST /gateway/collaborations` (Gateway OpenAPI, 2026-11-06): connect a messaging app.
+        For Mattermost the config is url, admin_user, admin_password, team_name, public_url."""
+        data = self._req(
+            "POST",
+            "/gateway/collaborations",
+            json={
+                "bridge_type": bridge_type,
+                "display_name": display_name,
+                "connection_config": connection_config,
+                "set_as_default": True,
+                "channel_creation_enabled": True,
+            },
+        )
+        return data.get("bridge", data) if isinstance(data, dict) else data
+
+    def set_default_bridge(self, bridge_id: str) -> None:
+        self._req("POST", f"/gateway/collaborations/{bridge_id}/default", ok=(200, 201, 204))
+
     def default_bridge_id(self) -> str | None:
         bridges = self.collaborations()
         for b in bridges:

@@ -147,6 +147,108 @@ def _email(username: str) -> str:
     return f"{username}@sindarin.local"
 
 
+MATTERMOST_ENV = Path("executor") / "mattermost.env"  # gitignored; present = a server of your own
+
+
+@dataclass
+class MattermostTarget:
+    """Which Mattermost the demo runs in: the bundled one from the stack env, or a server of your
+    own described in `executor/mattermost.env` (DDD §12.2 "Connect Mattermost")."""
+
+    url: str  # as people and this machine reach it
+    admin_user: str
+    admin_password: str
+    team_name: str
+    internal_url: str = ""  # as the Switch container reaches it; defaults to url
+    bridge_name: str = ""  # the Gateway connection's display name
+    own: bool = False  # True when it came from mattermost.env
+
+    @classmethod
+    def from_stack(cls, stack: dict[str, str], url: str | None = None) -> MattermostTarget:
+        return cls(
+            url=(url or f"http://localhost:{stack.get('MATTERMOST_HOST_PORT') or '8065'}").rstrip(
+                "/"
+            ),
+            admin_user=stack.get("MATTERMOST_ADMIN_USER", ""),
+            admin_password=stack.get("MATTERMOST_ADMIN_PASSWORD", ""),
+            team_name=stack.get("MATTERMOST_TEAM_NAME") or "switch",
+        )
+
+    @classmethod
+    def from_env_text(cls, text: str) -> MattermostTarget:
+        v = parse_env_text(text)
+        url = v.get("MATTERMOST_URL", "").rstrip("/")
+        missing = [
+            k
+            for k in ("MATTERMOST_URL", "MATTERMOST_ADMIN_USER", "MATTERMOST_ADMIN_PASSWORD")
+            if not v.get(k)
+        ]
+        if missing:
+            raise ValueError(f"mattermost.env lacks {', '.join(missing)}")
+        host = url.split("://", 1)[-1].split("/", 1)[0]
+        return cls(
+            url=url,
+            admin_user=v["MATTERMOST_ADMIN_USER"],
+            admin_password=v["MATTERMOST_ADMIN_PASSWORD"],
+            team_name=v.get("MATTERMOST_TEAM_NAME") or "switch",
+            internal_url=(v.get("MATTERMOST_INTERNAL_URL") or url).rstrip("/"),
+            bridge_name=v.get("SWITCH_BRIDGE_NAME") or f"Mattermost {host}",
+            own=True,
+        )
+
+    @classmethod
+    def resolve(
+        cls,
+        repo: Path,
+        stack: dict[str, str],
+        *,
+        mattermost_env: Path | None = None,
+        url: str | None = None,
+    ) -> MattermostTarget:
+        """An explicit file wins; else `executor/mattermost.env` if it exists; else the bundled
+        Mattermost of the compose stack."""
+        path = mattermost_env or (
+            repo / MATTERMOST_ENV if (repo / MATTERMOST_ENV).exists() else None
+        )
+        if path is not None:
+            return cls.from_env_text(path.read_text(encoding="utf-8"))
+        return cls.from_stack(stack, url)
+
+    def connection_config(self) -> dict[str, str]:
+        cfg = {
+            "url": self.internal_url or self.url,
+            "admin_user": self.admin_user,
+            "admin_password": self.admin_password,
+            "team_name": self.team_name,
+        }
+        if self.internal_url and self.internal_url != self.url:
+            cfg["public_url"] = self.url
+        return cfg
+
+
+def ensure_bridge(admin: GatewayClient, target: MattermostTarget) -> tuple[str, bool]:
+    """(bridge id, created). A server of your own gets a Gateway connection named `bridge_name`,
+    created once and made the default; the bundled server keeps the seeder's default bridge."""
+    bridges = admin.collaborations()
+    if not target.own:
+        return admin.default_bridge_id() or "", False
+    for b in bridges:
+        if b.get("display_name") == target.bridge_name:
+            bid = str(b.get("bridge_id") or b.get("id") or "")
+            if bid and not (b.get("is_default") or b.get("default")):
+                admin.set_default_bridge(bid)
+            return bid, False
+    made = admin.create_bridge(
+        bridge_type="mattermost",
+        display_name=target.bridge_name,
+        connection_config=target.connection_config(),
+    )
+    bid = str(made.get("bridge_id") or made.get("id") or "")
+    if bid:
+        admin.set_default_bridge(bid)
+    return bid, True
+
+
 def observe_as_agent(
     api: str,
     agent_id: str,
@@ -319,14 +421,28 @@ def run_bootstrap(
     write_ids: bool = True,
     github_mode: str | None = None,
     addressing: str = "rooms",
+    mattermost_env: Path | None = None,
 ) -> Report:
     rep = Report()
     stack = parse_env_text(stack_env.read_text(encoding="utf-8"))
     api = (api_url or f"http://localhost:{stack.get('API_HOST_PORT') or '8000'}").rstrip("/")
-    mm_url = (
-        mattermost_url or f"http://localhost:{stack.get('MATTERMOST_HOST_PORT') or '8065'}"
-    ).rstrip("/")
-    team_name = stack.get("MATTERMOST_TEAM_NAME") or "switch"
+    try:
+        target = MattermostTarget.resolve(
+            repo, stack, mattermost_env=mattermost_env, url=mattermost_url
+        )
+    except ValueError as exc:
+        rep.fail(str(exc))
+        return rep
+    mm_url = target.url
+    team_name = target.team_name
+    rep.say(
+        f"mattermost: {mm_url} team {team_name}"
+        + (
+            f" (your server; Gateway connection '{target.bridge_name}')"
+            if target.own
+            else " (bundled)"
+        )
+    )
     admin_email = stack.get("GATEWAY_ADMIN_EMAIL", "")
     admin_password = stack.get("GATEWAY_ADMIN_PASSWORD", "")
     if not (admin_email and admin_password):
@@ -410,11 +526,7 @@ def run_bootstrap(
     mm: MattermostClient | None = None
     team_id = ""
     try:
-        mm = MattermostClient.login(
-            mm_url,
-            stack.get("MATTERMOST_ADMIN_USER", ""),
-            stack.get("MATTERMOST_ADMIN_PASSWORD", ""),
-        )
+        mm = MattermostClient.login(mm_url, target.admin_user, target.admin_password)
         team_id = mm.team_by_name(team_name)["id"]
         for username, display in PEOPLE:
             user, created = mm.ensure_user(username, _email(username), demo_pass, display)
@@ -423,12 +535,15 @@ def run_bootstrap(
                 mm.add_to_team(team_id, user["id"])
             rep.say(f"mattermost user {username}: {'created' if created else 'exists'}")
     except (MattermostError, httpx.HTTPError, KeyError) as exc:
-        rep.fail(f"mattermost at {mm_url}: {str(exc)[:160]} (is the collab profile up?)")
+        rep.fail(
+            f"mattermost at {mm_url}: {str(exc)[:160]} "
+            + ("(check executor/mattermost.env)" if target.own else "(is the collab profile up?)")
+        )
 
     # 4. the bridged rooms (§17 step 2, verify item 1)
     try:
-        rep.bridge_id = admin.default_bridge_id() or ""
-        rep.say(f"bridge: {rep.bridge_id or 'none found'}")
+        rep.bridge_id, made = ensure_bridge(admin, target)
+        rep.say(f"bridge: {rep.bridge_id or 'none found'}{' (connected now)' if made else ''}")
         if rep.bridge_id:
             # Switch posts a canned "Hey! Ping @agent" when an agent joins a channel; the agents
             # speak for themselves (§13), so the greeting is turned off (verified 2026-11-05)

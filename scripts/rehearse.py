@@ -18,6 +18,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
 
+from sindarin.bootstrap import MattermostTarget  # noqa: E402
 from sindarin.executor.config import parse_env_text  # noqa: E402
 from sindarin.switch.mattermost import MattermostClient, MattermostError  # noqa: E402
 
@@ -34,10 +35,8 @@ class Stage:
         self.seen: set[str] = set()
         self.started_ms = int(time.time() * 1000)  # posts older than the run are never shown
 
-    def login(self, stack: dict[str, str]) -> None:
-        self.admin = MattermostClient.login(
-            self.url, stack["MATTERMOST_ADMIN_USER"], stack["MATTERMOST_ADMIN_PASSWORD"]
-        )
+    def login(self, admin_user: str, admin_password: str) -> None:
+        self.admin = MattermostClient.login(self.url, admin_user, admin_password)
         self.team_id = self.admin.team_by_name(self.team)["id"]
         for who in ("isaac", "leonardo", "john", "vincent"):
             self.people[who] = MattermostClient.login(
@@ -105,6 +104,12 @@ def main() -> int:
         "--stack-env", type=Path, default=Path.home() / ".sindarin" / "switch-stack" / ".env"
     )
     p.add_argument("--demo-pass", default="Sindarin-demo-1")
+    p.add_argument(
+        "--mattermost-env",
+        type=Path,
+        default=None,
+        help="a Mattermost server of your own (default: executor/mattermost.env if present)",
+    )
     p.add_argument("--wait", type=float, default=30.0)
     p.add_argument(
         "--agent-refusal",
@@ -121,13 +126,10 @@ def main() -> int:
     a = p.parse_args()
     sys.stdout.reconfigure(line_buffering=True)
     stack = parse_env_text(a.stack_env.read_text())
-    stage = Stage(
-        f"http://localhost:{stack.get('MATTERMOST_HOST_PORT') or '8065'}",
-        stack.get("MATTERMOST_TEAM_NAME") or "switch",
-        a.demo_pass,
-        a.wait,
-    )
-    stage.login(stack)
+    target = MattermostTarget.resolve(REPO, stack, mattermost_env=a.mattermost_env)
+    print(f"mattermost: {target.url} team {target.team_name}")
+    stage = Stage(target.url, target.team_name, a.demo_pass, a.wait)
+    stage.login(target.admin_user, target.admin_password)
 
     feat = "feat-csv-export"
     if a.start == "ask":
