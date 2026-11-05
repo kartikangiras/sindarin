@@ -75,6 +75,9 @@ class GatewayClient:
             return None
         return r.json()
 
+    def me(self) -> dict[str, Any]:
+        return self._req("GET", "/gateway/auth/me")
+
     # -- users (admin) ------------------------------------------------------------------------
 
     def list_users(self) -> list[dict[str, Any]]:
