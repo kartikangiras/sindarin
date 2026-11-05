@@ -4,7 +4,7 @@ four people, and print every reply the agents and executors post. A rehearsal, n
 tells you what the rooms will show on camera.
 
     uv run python scripts/rehearse.py [--stack-env ~/.sindarin/switch-stack/.env] [--demo-pass …]
-                                      [--skip-ask] [--wait 25]
+                                      [--from ask|pr|release] [--wait 25]
 """
 
 from __future__ import annotations
@@ -111,7 +111,15 @@ def main() -> int:
         action="store_true",
         help="the coder stand-in runs with SINDARIN_DEMO_AGENT_REFUSAL=1",
     )
+    p.add_argument(
+        "--from",
+        dest="start",
+        choices=("ask", "pr", "release"),
+        default="ask",
+        help="resume at a later gate when the earlier ones already happened",
+    )
     a = p.parse_args()
+    sys.stdout.reconfigure(line_buffering=True)
     stack = parse_env_text(a.stack_env.read_text())
     stage = Stage(
         f"http://localhost:{stack.get('MATTERMOST_HOST_PORT') or '8065'}",
@@ -121,6 +129,16 @@ def main() -> int:
     )
     stage.login(stack)
 
+    feat = "feat-csv-export"
+    if a.start == "ask":
+        run_ask_and_spec(stage)
+    if a.start in ("ask", "pr"):
+        run_build_and_merge(stage, feat, a)
+    run_release(stage)
+    return 0
+
+
+def run_ask_and_spec(stage: Stage) -> None:
     # 0–8 s · the ask
     ask = stage.say(
         "isaac", "acme-shared", "@product we need a CSV export of our orders for the finance team"
@@ -142,17 +160,20 @@ def main() -> int:
     stage.say("leonardo", "product", f"@sindarin-switch approve {spec}", root_id=spec_root)
     stage.watch("product", until=r"feature room \*\*#feat-csv-export\*\* is open")
 
+
+def run_build_and_merge(stage: Stage, feat: str, a: argparse.Namespace) -> None:
     # 18–32 s · build and review
-    feat = "feat-csv-export"
-    stage.watch(feat, until=r"\*\*PR-\d+\*\* pending", wait=a.wait * 2)
-    posts = stage.watch(feat, until=r"\*\*(\d+) of \1\*\*|All criteria met", wait=a.wait * 2)
+    posts = stage.watch(feat, until=r"\*\*PR-\d+\*\* pending", wait=a.wait * 2)
+    posts += stage.watch(feat, until=r"\*\*(\d+) of \1\*\*|All criteria met", wait=a.wait * 2)
     if a.agent_refusal:
         posts += stage.watch(feat, until=r"is an agent, not an approver")
-    pr_id = "PR-41"
+    pr_id = None
     for q in posts:
-        m = re.search(r"\*\*(PR-\d+)\*\*", q.get("message", ""))
+        m = re.search(r"\*\*(PR-\d+)\*\* pending", q.get("message", ""))
         if m:
             pr_id = m.group(1)
+    if pr_id is None:
+        raise SystemExit(f"no **PR-n** pending post appeared in #{feat}; nothing to approve")
     pr_root = None
     assert stage.admin is not None
     for q in stage.admin.posts(stage.channel(feat)["id"], 60):
@@ -161,21 +182,25 @@ def main() -> int:
 
     # 32–44 s · two refusals, then the merge
     stage.say("vincent", feat, f"@sindarin-github approve {pr_id}", root_id=pr_root)
-    stage.watch(feat, until=r"not a engineering approver")
+    stage.watch(feat, until=r"is not in the engineering group")
     stage.say("isaac", feat, f"@sindarin-github approve {pr_id}", root_id=pr_root)
-    stage.watch(feat, until=r"approved by Isaac · merged")
+    stage.watch(feat, until=r"approved by Isaac · merged", wait=a.wait * 2)
 
+
+def run_release(stage: Stage) -> None:
     # 44–54 s · the release gate
     stage.say("john", "releases", "@release draft the release")
     posts = stage.watch("releases", until=r"\*\*REL-\d+\*\* pending")
-    rel_id = "REL-1"
+    rel_id = None
     rel_root = None
     for q in posts:
-        m = re.search(r"\*\*(REL-\d+)\*\*", q.get("message", ""))
+        m = re.search(r"\*\*(REL-\d+)\*\* pending", q.get("message", ""))
         if m:
             rel_id = m.group(1)
         if "sindarin-proposal" in q.get("message", "") and not q.get("root_id"):
             rel_root = q["id"]
+    if rel_id is None:
+        raise SystemExit("no **REL-n** pending post appeared in #releases; nothing to approve")
     stage.say("john", "releases", f"@sindarin-github approve {rel_id}", root_id=rel_root)
     stage.watch("releases", until=r"approved by John · published")
 
