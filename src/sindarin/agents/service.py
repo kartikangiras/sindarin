@@ -205,10 +205,13 @@ def github_for(role: str, repo_root: Path, values: dict[str, str]) -> AgentGitHu
     repo = next((r.repo for r in policy.rules if r.repo), "")
     if cfg.github_mode == "simulated":
         return SimGitHub(repo_root / "executor" / "simulated-github.json", repo)
-    token = values.get("CODER_GITHUB_TOKEN") if role == coder.NAME else values.get("GITHUB_TOKEN")
-    if not token or not repo:
+    if not repo:
         return None
-    return RealGitHub(token, repo)
+    if role == coder.NAME:
+        token = values.get("CODER_GITHUB_TOKEN", "")
+        return RealGitHub(token, repo) if token else None
+    # reviewer and release hold no GitHub credential: anonymous reads of the public repository
+    return RealGitHub(values.get("GITHUB_TOKEN", ""), repo)
 
 
 async def run_agent(repo_root: Path, role_name: str) -> int:

@@ -91,20 +91,19 @@ class SimGitHub:
 
 class RealGitHub:
     """api.github.com with whatever token the role holds. The coder's token can push and open
-    pull requests on one repository and nothing else; the others are read-only."""
+    pull requests on one repository and nothing else; the others hold no token and read the
+    public repository anonymously (DDD §4.2)."""
 
     def __init__(self, token: str, repo: str, *, base_url: str = "https://api.github.com") -> None:
         self.repo = repo
-        self._http = httpx.Client(
-            base_url=base_url,
-            timeout=20.0,
-            headers={
-                "Accept": "application/vnd.github+json",
-                "X-GitHub-Api-Version": API_VERSION,
-                "Authorization": f"Bearer {token}",
-                "User-Agent": "sindarin-agent",
-            },
-        )
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": API_VERSION,
+            "User-Agent": "sindarin-agent",
+        }
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        self._http = httpx.Client(base_url=base_url, timeout=20.0, headers=headers)
 
     def _get(self, path: str, **params: Any) -> Any:
         r = self._http.get(path, params=params or None)

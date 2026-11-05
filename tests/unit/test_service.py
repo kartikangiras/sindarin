@@ -234,3 +234,30 @@ async def test_service_thread_replies_off(exec_dir: Path):
     assert posts == [{"room_id": FEATURE, "content": "hello"}]
     service.store.close()
     client.close()
+
+
+def test_github_for_roles_in_real_mode(tmp_path, repo_root):
+    """Real mode: the coder needs its own token or gets no client; reviewer and release hold no
+    token and read the public repository anonymously (DDD §4.2)."""
+    import re
+    import shutil
+
+    from sindarin.agents.github_client import RealGitHub
+    from sindarin.agents.service import github_for
+
+    (tmp_path / "executor").mkdir()
+    (tmp_path / "agents" / "policy").mkdir(parents=True)
+    text = (repo_root / "executor" / "github.yaml").read_text()
+    (tmp_path / "executor" / "github.yaml").write_text(
+        re.sub(r"^github_mode: \w+$", "github_mode: real", text, flags=re.M)
+    )
+    for name in ("policy.yaml", "users.yaml"):
+        shutil.copy(repo_root / "agents" / "policy" / name, tmp_path / "agents" / "policy" / name)
+
+    assert github_for("coder", tmp_path, {}) is None
+    coder_gh = github_for("coder", tmp_path, {"CODER_GITHUB_TOKEN": "ghp_FAKEcoder"})
+    assert isinstance(coder_gh, RealGitHub)
+    assert coder_gh._http.headers["Authorization"] == "Bearer ghp_FAKEcoder"
+    for role in ("reviewer", "release"):
+        gh = github_for(role, tmp_path, {})
+        assert isinstance(gh, RealGitHub) and "Authorization" not in gh._http.headers
