@@ -213,12 +213,14 @@ def test_no_secret_strings_in_agent_dirs(repo_root):
         if not path.is_file() or ".switch" in path.parts or ".claude" in path.parts:
             continue
         text = path.read_text(encoding="utf-8", errors="ignore")
-        assert "ghp_" not in text and "github_pat_" not in text, path
         if path.name == ".env":
+            # the coder's scoped GitHub token lives here by design (DDD §4.2); the file must be ignored
             ignored = subprocess.run(
                 ["git", "check-ignore", "-q", str(path)], cwd=repo_root, check=False
             )
             assert ignored.returncode == 0, f"{path} must be gitignored"
         elif path.name != ".env.example":
+            has_token = "ghp_" in text or "github_pat_" in text
+            assert not has_token, path
             assert "SWITCH_AGENT_API_KEY" not in text and "ANTHROPIC_API_KEY" not in text, path
             assert "GITHUB_TOKEN" not in text, path
