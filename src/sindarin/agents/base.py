@@ -152,6 +152,7 @@ class RoleAgent:
         messages = self.build_messages(thread, header)
         system = self.system_prompt()
         tool_outputs: set[str] = set()
+        last_fenced: str | None = None  # the newest validator-produced block, if any
         for _ in range(self.max_turns):
             response = self.model_call(
                 model=self.model,
@@ -186,6 +187,7 @@ class RoleAgent:
                         out, ok = f"tool error: {exc.__class__.__name__}", False
                 if ok and FENCE_RE.search(out):
                     tool_outputs.add(out.strip())
+                    last_fenced = out.strip()
                 log.info("%s.%s → %s", self.role, tu.name, "ok" if ok else out[:80])
                 results.append(
                     {
@@ -196,6 +198,11 @@ class RoleAgent:
                     }
                 )
             messages.append({"role": "user", "content": results})
+        if last_fenced is not None:
+            # The budget ran out after a validator accepted a block: post that block rather than
+            # lose the work (seen live 2026-11-05 when the real coder used every turn on the PR).
+            log.info("%s: turn budget reached, posting the last validated block", self.role)
+            return self.guard(last_fenced, tool_outputs)
         return "I could not finish within the turn budget. A person should take a look."
 
     @staticmethod

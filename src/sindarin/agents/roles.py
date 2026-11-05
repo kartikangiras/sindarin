@@ -115,6 +115,7 @@ def build_agent(role: Role, ctx: RoleContext, model_call, *, room_id: str = "") 
         tools=role.tools(ctx),
         model_call=model_call,
         context=lambda: role.context_text(ctx, room_id),
+        max_turns=getattr(role, "MAX_TURNS", 8),
     )
 
 

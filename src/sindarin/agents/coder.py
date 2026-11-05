@@ -18,6 +18,8 @@ from sindarin.schema import Kind
 from sindarin.switch.events import MessageEvent
 
 NAME = "coder"
+# A real clone takes more tool rounds than a chat turn: read, write, test, push, open, propose.
+MAX_TURNS = 16
 SPEC_RE = re.compile(r"\bSPEC-\d+\b")
 
 OPEN_PR = strict_tool(

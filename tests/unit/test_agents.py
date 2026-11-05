@@ -377,3 +377,41 @@ def test_agent_md_files_exist_and_name_the_rules(repo_root):
         parse_proposal("```sindarin-proposal\n{}\n```")[1] is None or (_ for _ in ()).throw(
             ValueError()
         )
+
+
+def test_turn_budget_posts_the_last_validated_block(tmp_path):
+    """The budget ran out right after a validator accepted a block (the real coder, 2026-11-05):
+    the block is posted instead of the give-up line. With no validated block, the line stands."""
+    from sindarin.agents.base import RoleAgent, ScriptedModel, Tool, Turn, strict_tool
+
+    block = '@sindarin-github proposal\n```sindarin-proposal\n{"kind": "pr"}\n```'
+    md = tmp_path / "AGENT.md"
+    md.write_text("You propose.")
+    turn = Turn(sender="@switch-mattermost-x-isaac:localhost", sender_name="Isaac", body="go")
+
+    proposing = Tool(strict_tool("propose", "always validates", {}, []), lambda args: (block, True))
+    agent = RoleAgent(
+        role="coder",
+        agent_md=md,
+        tools=[proposing],
+        model_call=ScriptedModel(lambda m, s: ("tool", "propose", {})),
+        max_turns=2,
+    )
+    assert agent.respond([turn], "header") == block
+
+    looking = Tool(strict_tool("look", "no fence", {}, []), lambda args: ("ok", True))
+    agent2 = RoleAgent(
+        role="coder",
+        agent_md=md,
+        tools=[looking],
+        model_call=ScriptedModel(lambda m, s: ("tool", "look", {})),
+        max_turns=2,
+    )
+    assert "turn budget" in agent2.respond([turn], "header")
+
+
+def test_coder_gets_a_larger_turn_budget(tmp_path):
+    ctx = _ctx("coder", "@switch-agent-f58c91b6:localhost", tmp_path)
+    assert build_agent(coder, ctx, ScriptedModel(coder.fake_step(ctx))).max_turns == 16
+    pctx = _ctx("product", "@switch-agent-ca7d6fcc:localhost", tmp_path)
+    assert build_agent(product, pctx, ScriptedModel(product.fake_step(pctx))).max_turns == 8
