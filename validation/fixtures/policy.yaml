@@ -1,0 +1,43 @@
+# Test policy (DDD §10.1, §15.3). Ids are synthetic; the shapes follow §12.1.
+version: 2
+groups:
+  pm: ["@switch-user-leonardo:test"]
+  engineering: ["@switch-user-isaac:test"]
+  release: ["@switch-user-john:test"]
+proposers:
+  product: "@switch-agent-product:test"
+  coder: "@switch-agent-coder:test"
+  reviewer: "@switch-agent-reviewer:test"
+  release: "@switch-agent-release:test"
+executors:
+  sindarin-switch: "@switch-agent-sindarin-switch:test"
+  sindarin-github: "@switch-agent-sindarin-github:test"
+rooms:
+  product: "!room-product:test"
+  releases: "!room-releases:test"
+  customer: "!room-acme-shared:test"
+rules:
+  - name: spec
+    kind: spec
+    proposer: product
+    approvers: pm
+    room: product
+    allowed_repos: ["acme/sindarin-demo-app"]
+    engineers: engineering
+    pending_ttl: 24h
+  - name: merge
+    kind: pr
+    proposer: coder
+    approvers: engineering
+    room: feature
+    repo: "acme/sindarin-demo-app"
+    base: main
+    pending_ttl: 24h
+  - name: release
+    kind: release
+    proposer: release
+    approvers: release
+    room: releases
+    repo: "acme/sindarin-demo-app"
+    tag_pattern: "^v\\d+\\.\\d+\\.\\d+$"
+    pending_ttl: 24h

@@ -1,0 +1,6 @@
+version: 2
+users:
+  "@switch-user-isaac:test": { name: Isaac, github: isaac-gh }
+  "@switch-user-leonardo:test": { name: Leonardo }
+  "@switch-user-john:test": { name: John }
+  "@switch-user-vincent:test": { name: Vincent, github: vincent-gh }
