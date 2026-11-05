@@ -1,0 +1,27 @@
+# python
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.venv/
+*.egg-info/
+build/
+dist/
+.DS_Store
+/.env
+.env.local
+# secrets and local state (DDD §16.2): one env file per process, one state file per executor
+agents/*/.env
+agents/*/.claude/
+executor/*.env
+executor/*.db
+executor/*.db-journal
+executor/*.db-shm
+executor/*.db-wal
+executor/simulated-github.json
+executor/*.log
+
+# documentation stays local: only the READMEs and the agents' prompts are published
+*.md
+!README.md
+!agents/*/AGENT.md
