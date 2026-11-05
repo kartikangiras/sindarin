@@ -1,0 +1,12 @@
+# Themes the product agent cites when scoping (DDD §10.3). Demo content.
+quarter: 2026-Q4
+themes:
+  - name: Reporting for finance teams
+    priority: 1
+    notes: Exports and reconciliation. CSV first, XLSX later, scheduled exports not this quarter.
+  - name: API reliability
+    priority: 2
+    notes: Size limits and clear errors instead of timeouts.
+  - name: Self-serve onboarding
+    priority: 3
+    notes: Out of scope for Acme's current asks.
