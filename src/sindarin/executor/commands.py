@@ -47,9 +47,14 @@ class Board:
     pass
 
 
-Command = Approve | Deny | Changes | Status | Whoami | Help | Board
+@dataclass(frozen=True)
+class Brief:
+    """Re-post the plan room's goals (sindarin-switch): for a member the opening brief missed."""
 
-_ID = r"((?:SPEC|PR|REL)-\d+)"
+
+Command = Approve | Deny | Changes | Status | Whoami | Help | Board | Brief
+
+_ID = r"((?:GOALS|BUDGET|ENTRIES)-\d+)"
 _TABLE: tuple[tuple[re.Pattern[str], type], ...] = (
     (re.compile(rf"^approve\s+{_ID}$", re.IGNORECASE), Approve),
     (re.compile(rf"^deny\s+{_ID}(?:\s+(.{{1,300}}))?$", re.IGNORECASE | re.DOTALL), Deny),
@@ -58,11 +63,14 @@ _TABLE: tuple[tuple[re.Pattern[str], type], ...] = (
     (re.compile(r"^whoami$", re.IGNORECASE), Whoami),
     (re.compile(r"^help$", re.IGNORECASE), Help),
     (re.compile(r"^board$", re.IGNORECASE), Board),
+    (re.compile(r"^brief$", re.IGNORECASE), Brief),
 )
+TRAILING_PUNCTUATION = " .!,;:"  # people end commands with a period; it changes nothing
 
 HELP_TEXT = (
     "Commands: `approve <id>` · `deny <id> <reason>` · `changes <id> <note>` · "
-    "`status [<id>]` · `whoami` · `help` · `board`. Ids are SPEC-n, PR-n, REL-n."
+    "`status [<id>]` · `whoami` · `help` · `board` · `brief` (the plan room's goals). "
+    "Ids are GOALS-n, BUDGET-n, ENTRIES-n."
 )
 
 
@@ -84,12 +92,12 @@ def is_bare_mention(body: str, names: tuple[str, ...] = DEFAULT_NAMES) -> bool:
 
 def parse_command(body: str, names: tuple[str, ...] = DEFAULT_NAMES) -> Command | None:
     """Return the parsed command, or None for anything not in the table (ignored silently)."""
-    text = strip_mentions(body, names)
+    text = strip_mentions(body, names).rstrip(TRAILING_PUNCTUATION)
     for pattern, cls in _TABLE:
         m = pattern.match(text)
         if not m:
             continue
-        if cls in (Whoami, Help, Board):
+        if cls in (Whoami, Help, Board, Brief):
             return cls()
         if cls is Status:
             aid = m.group(1)

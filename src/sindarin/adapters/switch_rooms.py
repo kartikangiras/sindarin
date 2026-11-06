@@ -1,5 +1,5 @@
-"""Switch rooms adapter for sindarin-switch (DDD §7.2): open a bridged feature room with the
-spec as instructions, add the people and agents the snapshot names, read the members back.
+"""Switch rooms adapter for sindarin-switch (design v5 §5): open a bridged plan room with the
+goals as instructions, add the people and agents the snapshot names, read the members back.
 
 Talks to the Gateway (`POST /gateway/rooms`, verify item 4 in §12.4). The participant ids in the
 snapshot are translated to Gateway agent ids and Mattermost user names through a directory that
@@ -9,11 +9,12 @@ bootstrap writes into executor/switch.yaml; the translation is display plumbing,
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Mapping
 from typing import Any, Protocol
 
 from sindarin.adapters.base import ActionResult, AdapterError, Facts, VerifyResult
-from sindarin.executor.core import spec_instructions
+from sindarin.executor.core import plan_instructions
 from sindarin.schema import Artifact, Kind, Proposal
 
 log = logging.getLogger("sindarin.rooms")
@@ -41,9 +42,16 @@ class RoomsGateway(Protocol):
     def add_room_users(self, room_id: str, user_names: list[str]) -> None: ...
 
 
+# After a bridged room is created the Gateway lists its members at once, but the bridge is still
+# syncing them to Mattermost for a moment; a post in that window reaches only the members already
+# synced (2026-11-06: the reviewer never saw the brief). Adapters run off the event loop, so a
+# short wait here is safe. Tests set it to 0.
+SETTLE_SECONDS = 3.0
+
+
 class SwitchRoomsAdapter:
     platform = "switch"
-    kinds = frozenset({Kind.SPEC})
+    kinds = frozenset({Kind.GOALS})
 
     def __init__(
         self,
@@ -53,12 +61,14 @@ class SwitchRoomsAdapter:
         directory: Mapping[str, str],
         channel_type: str = "channel_private",
         scoped_addressing: bool = True,
+        settle_seconds: float | None = None,
     ) -> None:
         self.gateway = gateway
         self.bridge_id = bridge_id
         self.directory = dict(directory)  # participant id → gateway agent id | mattermost username
         self.channel_type = channel_type
         self.scoped_addressing = scoped_addressing
+        self.settle_seconds = SETTLE_SECONDS if settle_seconds is None else settle_seconds
 
     def read_facts(self, proposal: Proposal) -> Facts:
         return Facts(ok=True, data={})
@@ -67,12 +77,18 @@ class SwitchRoomsAdapter:
         missing = [i for i in ids if i not in self.directory]
         if missing:
             raise AdapterError(f"{len(missing)} participant id(s) missing from the directory")
-        return [self.directory[i] for i in ids]
+        return list(dict.fromkeys(self.directory[i] for i in ids))  # one person, one seat
 
     def _find(self, name: str) -> dict[str, Any] | None:
+        """The room of that name on this adapter's bridge. With two Mattermost servers connected
+        the same name exists once per bridge; a room elsewhere is never reused (2026-11-06)."""
         for room in self.gateway.list_rooms():
-            if (room.get("name") or room.get("slug")) == name:
-                return room
+            if (room.get("name") or room.get("slug")) != name:
+                continue
+            on = str(room.get("bridge_id") or "")
+            if self.bridge_id and on and on != self.bridge_id:
+                continue
+            return room
         return None
 
     def execute(self, a: Artifact) -> ActionResult:
@@ -87,8 +103,11 @@ class SwitchRoomsAdapter:
             if existing is None:
                 room = self.gateway.create_room(
                     name=slug,
-                    description=f"Feature room for {a.id}: {body.title}. Merge is approved here.",
-                    instructions=spec_instructions(proposal),
+                    description=(
+                        f"Plan room for {a.id}: {body.title}. The budget register entries are "
+                        "approved here."
+                    ),
+                    instructions=plan_instructions(proposal),
                     bridge_id=self.bridge_id,
                     channel_type=self.channel_type,
                     agent_ids=agents,
@@ -106,6 +125,8 @@ class SwitchRoomsAdapter:
         except Exception as exc:  # the Gateway's words are safe to show; its cookie is not
             raise AdapterError(f"Gateway: {str(exc)[:160]}") from None
         widened = self._widen_addressing(str(room.get("id") or ""), agents)
+        if existing is None:
+            self._settle(str(room.get("id") or ""), agents, users)
         return ActionResult(
             ok=True,
             data={
@@ -115,6 +136,24 @@ class SwitchRoomsAdapter:
                 "addressing_widened": widened,
             },
         )
+
+    def _settle(self, room_id: str, agents: list[str], users: list[str]) -> None:
+        """Wait until the Gateway lists every member, then a grace period for the bridge, so the
+        brief posted next reaches everyone (see SETTLE_SECONDS)."""
+        if not room_id or self.settle_seconds <= 0:
+            return
+        deadline = time.monotonic() + max(10.0, self.settle_seconds * 3)
+        while time.monotonic() < deadline:
+            try:
+                members = self.gateway.room_members(room_id)
+            except Exception:
+                break
+            if set(agents) <= set(members.get("agents", [])) and set(users) <= set(
+                members.get("users", [])
+            ):
+                break
+            time.sleep(0.5)
+        time.sleep(self.settle_seconds)
 
     def _widen_addressing(self, room_id: str, gateway_agent_ids: list[str]) -> int:
         """Layer 0 for a room that did not exist at bootstrap (§5): every agent whose policy is

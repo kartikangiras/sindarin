@@ -1,4 +1,4 @@
-"""policy.yaml: groups, proposers, rooms and rules by kind (DDD §10.1); the P2/P3 checks."""
+"""policy.yaml: groups, proposers, rooms and rules by kind (design v5 §6); the P2/P3/P4 checks."""
 
 from __future__ import annotations
 
@@ -10,12 +10,12 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from sindarin.names import AGENT_ROLES, EXECUTORS
-from sindarin.schema import REPO_PATTERN, RULE_PATTERN, Kind, Proposal
+from sindarin.schema import CURRENCIES, RULE_PATTERN, Kind, Proposal
 
 DURATION_RE = re.compile(r"^(\d+)(m|h|d)$")
 _UNITS = {"m": 60, "h": 3600, "d": 86400}
-ROOM_KEYS = ("product", "releases", "customer")
-FEATURE_ROOM = "feature"  # the artifact's own room (§10.1 merge rule)
+ROOM_KEYS = ("finance", "planning")
+PERIOD_ROOM = "period"  # the artifact's own room: the plan room the goals opened
 
 
 def parse_duration(text: str) -> int:
@@ -42,16 +42,14 @@ class Rule(BaseModel):
     kind: Kind
     proposer: str = Field(min_length=1)  # a role in `proposers`
     approvers: str = Field(min_length=1)  # a group in `groups`
-    room: str = Field(min_length=1)  # a key in `rooms`, or `feature`
+    room: str = Field(min_length=1)  # a key in `rooms`, or `period`
     pending_ttl: str = "24h"
-    # spec
-    allowed_repos: list[str] = Field(default_factory=list)
-    engineers: str = "engineering"  # group whose members a spec may name as its engineer
-    # pr / release
-    repo: str = ""
-    base: str = "main"
-    tag_pattern: str = r"^v\d+\.\d+\.\d+$"
-    merge_method: str = Field(default="squash", pattern="^(squash|merge|rebase)$")
+    currency: str = "USD"
+    # goals: a second group invited into the plan room (the controllers sit with the cfo)
+    also_invite: str = ""
+    # budget: below the limit a second group may approve (the cfo alone for small budgets)
+    limit_cents: int | None = None
+    approvers_under_limit: str = ""
 
     @field_validator("pending_ttl")
     @classmethod
@@ -59,47 +57,47 @@ class Rule(BaseModel):
         parse_duration(v)
         return v
 
-    @field_validator("allowed_repos")
+    @field_validator("currency")
     @classmethod
-    def _repos(cls, v: list[str]) -> list[str]:
-        for r in v:
-            if not re.match(REPO_PATTERN, r):
-                raise ValueError(f"bad repository {r!r}")
-        return v
-
-    @field_validator("tag_pattern")
-    @classmethod
-    def _tag_re(cls, v: str) -> str:
-        try:
-            re.compile(v)
-        except re.error as exc:
-            raise ValueError(f"tag_pattern is not a regular expression: {exc}") from None
+    def _currency(cls, v: str) -> str:
+        if v not in CURRENCIES:
+            raise ValueError(f"currency must be one of {', '.join(CURRENCIES)}")
         return v
 
     @model_validator(mode="after")
     def _fits_kind(self) -> Rule:
-        if self.kind is Kind.SPEC:
-            if not self.allowed_repos:
-                raise ValueError(f"rule {self.name}: a spec rule needs allowed_repos")
-            if self.room == FEATURE_ROOM:
-                raise ValueError(f"rule {self.name}: specs are approved in a named room")
-        else:
-            if not re.match(REPO_PATTERN, self.repo):
-                raise ValueError(
-                    f"rule {self.name}: a {self.kind.value} rule needs repo owner/repo"
-                )
-            if self.kind is Kind.PR and self.room != FEATURE_ROOM:
-                raise ValueError(f"rule {self.name}: merges are approved in the feature room")
+        if self.kind is Kind.GOALS and self.room == PERIOD_ROOM:
+            raise ValueError(f"rule {self.name}: goals are approved in a named room")
+        if self.kind is Kind.BUDGET and self.room == PERIOD_ROOM:
+            raise ValueError(f"rule {self.name}: budgets are approved in a named room")
+        if self.kind is Kind.ENTRIES and self.room != PERIOD_ROOM:
+            raise ValueError(f"rule {self.name}: the entries are approved in the plan room")
+        if (self.limit_cents is None) != (not self.approvers_under_limit):
+            raise ValueError(f"rule {self.name}: limit_cents and approvers_under_limit go together")
+        if self.limit_cents is not None and self.kind is not Kind.BUDGET:
+            raise ValueError(f"rule {self.name}: only a budget rule has a limit")
         return self
 
     @property
     def pending_ttl_seconds(self) -> int:
         return parse_duration(self.pending_ttl)
 
+    def approver_groups(self, total_cents: int | None) -> list[str]:
+        """The groups whose members may approve, given the amount the executor read."""
+        groups = [self.approvers]
+        if (
+            self.limit_cents is not None
+            and total_cents is not None
+            and total_cents <= self.limit_cents
+            and self.approvers_under_limit
+        ):
+            groups.append(self.approvers_under_limit)
+        return groups
+
 
 class Policy(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    version: int = 2
+    version: int = 3
     groups: dict[str, list[str]] = Field(default_factory=dict)
     proposers: dict[str, str] = Field(default_factory=dict)
     executors: dict[str, str] = Field(default_factory=dict)
@@ -155,10 +153,11 @@ class Policy(BaseModel):
                 raise ValueError(f"rule {r.name}: approvers group {r.approvers!r} is not defined")
             if r.proposer not in self.proposers:
                 raise ValueError(f"rule {r.name}: proposer {r.proposer!r} is not defined")
-            if r.room != FEATURE_ROOM and r.room not in ROOM_KEYS:
+            if r.room != PERIOD_ROOM and r.room not in ROOM_KEYS:
                 raise ValueError(f"rule {r.name}: room {r.room!r} is not a known room")
-            if r.kind is Kind.SPEC and r.engineers not in self.groups:
-                raise ValueError(f"rule {r.name}: engineers group {r.engineers!r} is not defined")
+            for extra in (r.also_invite, r.approvers_under_limit):
+                if extra and extra not in self.groups:
+                    raise ValueError(f"rule {r.name}: group {extra!r} is not defined")
         return self
 
     # -- lookups (ids only, never names) ----------------------------------------------------
@@ -173,7 +172,7 @@ class Policy(BaseModel):
         return list(self.groups.get(group, []))
 
     def in_group(self, participant_id: str, group: str) -> bool:
-        """Exact match on the opaque participant id (§4.3 rule 3)."""
+        """Exact match on the opaque participant id."""
         return bool(participant_id) and participant_id in self.groups.get(group, [])
 
     def groups_of(self, participant_id: str) -> list[str]:
@@ -187,7 +186,7 @@ class Policy(BaseModel):
 
     @property
     def agent_ids(self) -> frozenset[str]:
-        """Every non-human participant: the four agents and the two executors (A3)."""
+        """Every non-human participant: the three agents and the two executors (A3)."""
         return frozenset(pid for pid in (*self.proposers.values(), *self.executors.values()) if pid)
 
     def executor_id(self, handle: str) -> str:
@@ -212,7 +211,7 @@ def load_policy(path: str | Path) -> Policy:
 
 
 # ---------------------------------------------------------------------------------------------
-# P2 / P3 / P4 checks (DDD §7.1)
+# P2 / P3 / P4 checks
 # ---------------------------------------------------------------------------------------------
 
 
@@ -230,54 +229,53 @@ def check_proposer(policy: Policy, proposal: Proposal, proposer_id: str) -> str 
 
 
 def check_target(policy: Policy, proposal: Proposal) -> str | None:
-    """P3: action and target are in the rule's allow-list."""
+    """P3: the proposal fits the rule: its currency, its shape."""
     rule = policy.rule(proposal.rule)
     if rule is None:
         return f"unknown rule {proposal.rule!r}"
     body: Any = proposal.body
-    if proposal.kind is Kind.SPEC:
-        if body.repo not in rule.allowed_repos:
-            return (
-                f"repository {body.repo!r} is not allowed by rule {rule.name} "
-                f"(allowed: {', '.join(rule.allowed_repos)})"
-            )
-        if not policy.in_group(body.engineer, rule.engineers):
-            return f"engineer is not in group {rule.engineers}"
-        return None
-    if proposal.repo != rule.repo:
-        return (
-            f"repository {proposal.repo!r} is not allowed by rule {rule.name} "
-            f"(allowed: {rule.repo})"
-        )
-    if proposal.kind is Kind.RELEASE and not re.match(rule.tag_pattern, body.tag):
-        return f"tag {body.tag!r} does not match rule {rule.name} pattern {rule.tag_pattern}"
+    currency = getattr(body, "currency", None)
+    if currency is not None and currency != rule.currency:
+        return f"currency {currency} is not rule {rule.name}'s {rule.currency}"
+    if proposal.kind is Kind.GOALS and body.cost_cap_cents >= body.revenue_target_cents:
+        return "the cost cap must sit below the revenue target"
     return None
 
 
 def check_facts(policy: Policy, proposal: Proposal, facts: dict[str, Any]) -> str | None:
-    """P4: the platform-read snapshot must describe something the rule can act on."""
+    """P4: the ledger-read snapshot must describe something the rule can act on."""
     rule = policy.rule(proposal.rule)
     if rule is None:
         return f"unknown rule {proposal.rule!r}"
-    if proposal.kind is Kind.SPEC:
+    body: Any = proposal.body
+    if proposal.kind is Kind.GOALS:
         return None
-    if proposal.kind is Kind.PR:
-        if facts.get("state") != "open":
-            return f"pull request is {facts.get('state') or 'unknown'}, not open"
-        if facts.get("merged"):
-            return "pull request is already merged"
-        if facts.get("draft"):
-            return "pull request is a draft"
-        if facts.get("base") != rule.base:
+    if proposal.kind is Kind.BUDGET:
+        known = set(facts.get("accounts", []))
+        for line in body.lines:
+            if known and line.account not in known:
+                return f"account {line.account} is not in the chart"
+        cap = facts.get("cap_cents")
+        if cap is not None and body.total_cents > int(cap):
+            from sindarin.schema import money
+
             return (
-                f"pull request targets {facts.get('base')!r}, rule {rule.name} merges into "
-                f"{rule.base}"
+                f"the lines total {money(body.total_cents, rule.currency)}, over the cap "
+                f"{money(int(cap), rule.currency)} in {body.goals}"
             )
-        if not facts.get("head_sha"):
-            return "pull request head sha could not be read"
+        if facts.get("basis_status") == "unknown":
+            return "the basis period has no rows in the ledger"
         return None
-    if facts.get("tag_exists"):
-        return f"tag {proposal.body.tag} already exists"  # type: ignore[union-attr]
-    if not facts.get("commit_exists", False):
-        return "target sha is not a commit in the repository"
+    status = facts.get("period_status")
+    if status not in ("open", "unknown"):
+        return f"period {body.period} is {status}, already"
+    recorded = facts.get("budget_lines")
+    if not recorded:
+        return f"no budget is recorded for {body.period} yet"
+    if facts.get("budget_id") and facts["budget_id"] != body.budget:
+        return f"the recorded budget for {body.period} is {facts['budget_id']}, not {body.budget}"
+    mine = sorted((x.department, x.account, x.amount_cents) for x in body.lines)
+    theirs = sorted((r["department"], r["account"], int(r["amount_cents"])) for r in recorded)
+    if mine != theirs:
+        return "the lines differ from the budget recorded in the ledger"
     return None

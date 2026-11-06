@@ -1,5 +1,5 @@
 """The long-running executor process (DDD §7, §16.1): one asyncio loop with a WebSocket reader,
-a serial event handler, and a scheduler. `sindarin-exec run --executor switch|github`.
+a serial event handler, and a scheduler. `sindarin-exec run --executor switch|ledger`.
 Also the `--probe` mode for the §12.4 verification."""
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from sindarin.adapters.base import Adapter
 from sindarin.executor import core
 from sindarin.executor.config import Env, ExecutorConfig, load_executor
 from sindarin.executor.runner import Effector, RunnerConfig
-from sindarin.names import DISPLAY, GITHUB_EXECUTOR, SWITCH_EXECUTOR
+from sindarin.names import DISPLAY, LEDGER_EXECUTOR, SWITCH_EXECUTOR
 from sindarin.store import Store
 from sindarin.switch.client import ConnectionState, FatalEviction, SwitchClient, SwitchError
 from sindarin.switch.events import ControlFrame, Frame, MessageEvent, RoomJoinEvent
@@ -78,8 +78,11 @@ class ExecutorService:
         )
 
     def _learn_room_names(self) -> None:
-        """Feature rooms are opened after we start; their names come from connection_state."""
+        """Feature rooms are opened after we start; their names come from connection_state.
+        Switch may list a room as a bare id string (seen 2026-11-06); those carry no name."""
         for room in self.state.rooms:
+            if not isinstance(room, dict):
+                continue
             rid = room.get("room_id") or room.get("id")
             name = room.get("name") or room.get("slug")
             if rid and name and rid not in self.effector.config.room_names:
@@ -167,25 +170,12 @@ class ExecutorService:
 
 
 def build_adapters(env: Env, cfg: ExecutorConfig, exec_dir: Path) -> dict[str, Adapter]:
-    """One adapter per executor, one credential each (DDD §4.2)."""
-    if cfg.executor == GITHUB_EXECUTOR:
-        if cfg.github_mode == "simulated":
-            from sindarin.adapters.fake import FakeGitHub
-            from sindarin.policy import load_policy
+    """One adapter per executor, one credential each (design v4 §5)."""
+    if cfg.executor == LEDGER_EXECUTOR:
+        from sindarin.adapters.ledger import LedgerAdapter
+        from sindarin.ledger import Ledger
 
-            fake = FakeGitHub(path=str(exec_dir / "simulated-github.json"))
-            try:
-                policy = load_policy(cfg.resolve(exec_dir, cfg.policy_path))
-                repos = [r.repo for r in policy.rules if r.repo]
-                if repos:
-                    fake.repo = repos[0]
-                    fake._save()
-            except (OSError, ValueError):
-                pass
-            return {"github": fake}
-        from sindarin.adapters.github import GitHubAdapter
-
-        return {"github": GitHubAdapter(env.github_token)}
+        return {"ledger": LedgerAdapter(Ledger(cfg.resolve(exec_dir, cfg.ledger_db)))}
     from sindarin.adapters.switch_rooms import SwitchRoomsAdapter
     from sindarin.switch.gateway import GatewayClient
 
@@ -209,23 +199,16 @@ async def run_executor(exec_dir: Path, short: str) -> int:
         "SWITCH_AGENT_API_KEY",
         "SWITCH_CONNECTION_ID",
     ]
-    simulated = cfg.executor == GITHUB_EXECUTOR and cfg.github_mode == "simulated"
-    if cfg.executor == GITHUB_EXECUTOR and not simulated:
-        required.append("GITHUB_TOKEN")
     if cfg.executor == SWITCH_EXECUTOR:
         required += ["SWITCH_GATEWAY_EMAIL", "SWITCH_GATEWAY_PASSWORD"]
     missing = env.missing(*required)
-    env_file = exec_dir / f"{short}.env"
+    env_file = exec_dir.parent / ".env"
     if missing:
         log.error("missing in %s: %s (run `sindarin bootstrap`)", env_file, ", ".join(missing))
         return 1
     if cfg.missing():
         log.error("missing in %s: %s", exec_dir / f"{short}.yaml", ", ".join(cfg.missing()))
         return 1
-    if simulated:
-        log.warning(
-            "github_mode: simulated — merges and releases are recorded, GitHub is not called"
-        )
     client = SwitchClient(env.bridge_url, env.agent_id, env.api_key, client_name=cfg.executor)
     try:
         adapters = build_adapters(env, cfg, exec_dir)

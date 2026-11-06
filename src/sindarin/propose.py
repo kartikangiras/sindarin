@@ -1,4 +1,4 @@
-"""The validators behind `sindarin propose spec|pr|release` and the agents' tools (DDD §6).
+"""The validators behind the agents' tools (design v5 §4).
 
 An agent never hand-writes a fence: it calls one of these with plain arguments and posts the
 returned block verbatim. The executor re-validates everything; this layer exists so that a
@@ -7,7 +7,6 @@ model's output can only ever be a well-formed proposal or a one-line refusal.
 
 from __future__ import annotations
 
-from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -15,7 +14,15 @@ from pydantic import ValidationError
 
 from sindarin.names import EXECUTOR_OF_KIND
 from sindarin.policy import Policy, check_target, load_policy
-from sindarin.schema import MAX_JUSTIFICATION, PROPOSAL_SCHEMA, Kind, Proposal
+from sindarin.schema import (
+    MAX_JUSTIFICATION,
+    PROPOSAL_SCHEMA,
+    Kind,
+    Proposal,
+    budget_target,
+    entries_target,
+    goals_target,
+)
 
 
 def _one_line(exc: ValidationError) -> str:
@@ -49,42 +56,41 @@ def _finish(policy: Policy, data: dict[str, Any]) -> Proposal:
     return p
 
 
-def build_spec(
+def build_goals(
     policy: Policy,
     *,
+    period: str,
+    basis: str,
     title: str,
-    press_release: str,
-    faq: list[str],
-    criteria: list[str],
-    scope_in: list[str],
-    scope_out: list[str],
-    target_date: str | date,
-    engineer: str,
-    repo: str,
-    slug: str,
+    summary: str,
+    report: list[str],
+    revenue_target_cents: int,
+    margin_target_bps: int,
+    cost_cap_cents: int,
+    currency: str = "USD",
     ask: str = "",
     justification: str,
     rule: str | None = None,
 ) -> Proposal:
-    rule_name = _rule_for(policy, Kind.SPEC, rule)
+    rule_name = _rule_for(policy, Kind.GOALS, rule)
     return _finish(
         policy,
         {
             "schema": PROPOSAL_SCHEMA,
-            "kind": "spec",
+            "kind": "goals",
             "platform": "switch",
-            "action": "open_feature_room",
-            "target": slug,
+            "action": "open_plan_room",
+            "target": goals_target(period),
             "body": {
+                "period": period,
+                "basis": basis,
                 "title": title,
-                "press_release": press_release,
-                "faq": list(faq),
-                "criteria": list(criteria),
-                "scope_in": list(scope_in),
-                "scope_out": list(scope_out),
-                "target_date": str(target_date),
-                "engineer": engineer,
-                "repo": repo,
+                "summary": summary,
+                "report": list(report),
+                "revenue_target_cents": int(revenue_target_cents),
+                "margin_target_bps": int(margin_target_bps),
+                "cost_cap_cents": int(cost_cap_cents),
+                "currency": currency,
             },
             "ask": ask,
             "rule": rule_name,
@@ -93,30 +99,36 @@ def build_spec(
     )
 
 
-def build_pr(
+def build_budget(
     policy: Policy,
     *,
-    number: int,
-    title: str,
-    branch: str,
-    spec: str,
-    repo: str,
-    head_sha: str = "",
+    period: str,
+    goals: str,
+    lines: list[dict[str, Any]],
+    currency: str = "USD",
+    digest: str = "",
     ask: str = "",
     justification: str,
     rule: str | None = None,
 ) -> Proposal:
-    rule_name = _rule_for(policy, Kind.PR, rule)
+    rule_name = _rule_for(policy, Kind.BUDGET, rule)
+    total = sum(int(x.get("amount_cents", 0)) for x in lines)
     return _finish(
         policy,
         {
             "schema": PROPOSAL_SCHEMA,
-            "kind": "pr",
-            "platform": "github",
-            "action": "merge_pr",
-            "target": f"{repo}#{number}",
-            "snapshot_hint": head_sha or "",
-            "body": {"number": number, "title": title, "branch": branch, "spec": spec},
+            "kind": "budget",
+            "platform": "ledger",
+            "action": "record_budget",
+            "target": budget_target(period),
+            "snapshot_hint": digest or "",
+            "body": {
+                "period": period,
+                "goals": goals,
+                "lines": list(lines),
+                "total_cents": total,
+                "currency": currency,
+            },
             "ask": ask,
             "rule": rule_name,
             "justification": justification[:MAX_JUSTIFICATION],
@@ -124,36 +136,37 @@ def build_pr(
     )
 
 
-def build_release(
+def build_entries(
     policy: Policy,
     *,
-    tag: str,
-    target_sha: str,
-    notes: str,
-    specs: list[str],
-    asks: list[str],
-    repo: str,
+    period: str,
+    goals: str,
+    budget: str,
+    lines: list[dict[str, Any]],
+    memo: str,
+    digest: str = "",
+    ask: str = "",
     justification: str,
     rule: str | None = None,
 ) -> Proposal:
-    rule_name = _rule_for(policy, Kind.RELEASE, rule)
+    rule_name = _rule_for(policy, Kind.ENTRIES, rule)
     return _finish(
         policy,
         {
             "schema": PROPOSAL_SCHEMA,
-            "kind": "release",
-            "platform": "github",
-            "action": "create_release",
-            "target": f"{repo}@{tag}",
-            "snapshot_hint": target_sha,
+            "kind": "entries",
+            "platform": "ledger",
+            "action": "post_budget_entries",
+            "target": entries_target(period),
+            "snapshot_hint": digest or "",
             "body": {
-                "tag": tag,
-                "target_sha": target_sha,
-                "notes": notes,
-                "specs": list(specs),
-                "asks": list(asks),
+                "period": period,
+                "goals": goals,
+                "budget": budget,
+                "lines": list(lines),
+                "memo": memo,
             },
-            "ask": asks[0] if asks else "",
+            "ask": ask,
             "rule": rule_name,
             "justification": justification[:MAX_JUSTIFICATION],
         },

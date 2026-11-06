@@ -16,9 +16,8 @@ from typing import Any
 from sindarin.adapters.base import ActionResult, Adapter, AdapterError, Facts, VerifyResult
 from sindarin.executor import commands as cmd
 from sindarin.executor import core
-from sindarin.names import SWITCH_EXECUTOR
 from sindarin.policy import Policy, load_policy
-from sindarin.schema import Artifact, AuditEntry, utcnow
+from sindarin.schema import PROPOSAL_FENCE, Artifact, AuditEntry, has_fence, utcnow
 from sindarin.store import MessageRecord, Store
 from sindarin.switch.events import MessageEvent
 from sindarin.users import Users, load_users
@@ -83,9 +82,10 @@ class Effector:
         return self._load(self.config.users_path, load_users)
 
     def peer_artifacts(self) -> tuple[Artifact, ...]:
-        """The other executor's state, read-only, for the board and the spec stages (§14)."""
+        """The other executor's state, read-only: the board and the derived stages for
+        sindarin-switch, the plan a payment run or a lock names for sindarin-ledger."""
         path = self.config.peer_state_db
-        if not path or self.config.executor != SWITCH_EXECUTOR or not Path(path).exists():
+        if not path or not Path(path).exists():
             return ()
         try:
             peer = Store(path, readonly=True)
@@ -137,7 +137,10 @@ class Effector:
             )
         )
         facts = self._read_facts(core.lookups(self.context(), ev))
-        needs_peers = cmd.parse_command(ev.body, self.config.executor_names) is not None
+        # commands and proposals both consult the other executor's state (order, stages)
+        needs_peers = has_fence(ev.body, PROPOSAL_FENCE) or (
+            cmd.parse_command(ev.body, self.config.executor_names) is not None
+        )
         effects = core.handle_message(self.context(facts, peers=needs_peers), ev)
         self.store.mark_seen(ev.message_id)
         return self.apply(effects)
@@ -198,10 +201,6 @@ class Effector:
                         snapshot_sha=e.snapshot_sha,
                         decision=e.decision,
                         note=e.note,
-                    )
-                case core.RecordReview():
-                    self.store.record_review(
-                        e.artifact_id, e.review, e.reviewer_id, e.reviewer_name
                     )
                 case core.SetValue(key=k, value=v):
                     self.store.set_value(k, v)

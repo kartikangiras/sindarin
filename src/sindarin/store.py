@@ -16,7 +16,6 @@ from sindarin.schema import (
     Artifact,
     AuditEntry,
     Kind,
-    Review,
     State,
     utcnow,
 )
@@ -30,29 +29,28 @@ _WAITING = {
     State.EXPIRED: frozenset(),
 }
 TRANSITIONS: dict[Kind, dict[State, frozenset[State]]] = {
-    Kind.SPEC: {
+    Kind.GOALS: {
         **_WAITING,
         State.APPROVED: frozenset({State.OPENING}),
         State.OPENING: frozenset({State.OPEN, State.OPEN_FAILED}),
         State.OPEN_FAILED: frozenset({State.OPENING}),
         State.OPEN: frozenset({State.DONE}),
-        State.DONE: frozenset({State.RELEASED}),
-        State.RELEASED: frozenset(),
+        State.DONE: frozenset(),
     },
-    Kind.PR: {
+    Kind.BUDGET: {
         **_WAITING,
         State.APPROVED: frozenset({State.EXECUTING}),
-        State.EXECUTING: frozenset({State.MERGED, State.MERGE_FAILED}),
-        State.MERGE_FAILED: frozenset({State.EXECUTING, State.FAILED}),
-        State.MERGED: frozenset(),
+        State.EXECUTING: frozenset({State.RECORDED, State.RECORD_FAILED}),
+        State.RECORD_FAILED: frozenset({State.EXECUTING, State.FAILED}),
+        State.RECORDED: frozenset(),
         State.FAILED: frozenset(),
     },
-    Kind.RELEASE: {
+    Kind.ENTRIES: {
         **_WAITING,
         State.APPROVED: frozenset({State.EXECUTING}),
-        State.EXECUTING: frozenset({State.PUBLISHED, State.PUBLISH_FAILED}),
-        State.PUBLISH_FAILED: frozenset({State.EXECUTING, State.FAILED}),
-        State.PUBLISHED: frozenset(),
+        State.EXECUTING: frozenset({State.PLANNED, State.PLAN_FAILED}),
+        State.PLAN_FAILED: frozenset({State.EXECUTING, State.FAILED}),
+        State.PLANNED: frozenset(),
         State.FAILED: frozenset(),
     },
 }
@@ -301,23 +299,16 @@ class Store:
         )
 
     def peek_next_id(self, kind: Kind) -> str:
-        """The id the next spec or release will receive. PR ids come from GitHub (§8.4)."""
-        if kind is Kind.PR:
-            raise ValueError("PR ids are the GitHub pull request number")
+        """The id the next artifact of this kind gets: GOALS-1, BUDGET-1, ENTRIES-1, per kind."""
         n = int(self.get_value(f"next_{kind.value}") or 1)
         return f"{PREFIX[kind]}-{n}"
-
-    # -- artifacts ----------------------------------------------------------------------------
 
     def insert_artifact(self, a: Artifact) -> Artifact:
         if a.state is not State.PENDING:
             raise IllegalTransition(f"new artifacts start pending, not {a.state.value}")
-        if a.kind is not Kind.PR:
-            expected = self.peek_next_id(a.kind)
-            if a.id != expected:
-                raise ValueError(f"artifact id {a.id} must be {expected}")
-        elif not a.id.startswith("PR-"):
-            raise ValueError(f"bad PR id {a.id}")
+        expected = self.peek_next_id(a.kind)
+        if a.id != expected:
+            raise ValueError(f"artifact id {a.id} must be {expected}")
         if self.get(a.id) is not None:
             raise ValueError(f"artifact {a.id} already exists")
         data = self._row(a)
@@ -326,9 +317,8 @@ class Store:
         self._db.execute(
             f"INSERT INTO artifacts({cols}) VALUES ({qs})", [data[c] for c in _COLUMNS]
         )
-        if a.kind is not Kind.PR:
-            n = int(a.id.split("-", 1)[1])
-            self.set_value(f"next_{a.kind.value}", str(n + 1))
+        n = int(a.id.split("-", 1)[1])
+        self.set_value(f"next_{a.kind.value}", str(n + 1))
         return self.get(a.id)  # type: ignore[return-value]
 
     def get(self, artifact_id: str) -> Artifact | None:
@@ -454,37 +444,6 @@ class Store:
             "SELECT * FROM approvals WHERE artifact_id=? ORDER BY n", (artifact_id,)
         ).fetchall()
         return [dict(r) for r in rows]
-
-    # -- reviews -----------------------------------------------------------------------------
-
-    def record_review(
-        self, artifact_id: str, review: Review, reviewer_id: str, reviewer_name: str = ""
-    ) -> None:
-        self._db.execute(
-            "INSERT INTO reviews(artifact_id, head_sha, reviewer_id, reviewer_name, report_json,"
-            " created_at) VALUES (?,?,?,?,?,?)",
-            (
-                artifact_id,
-                review.head_sha,
-                reviewer_id,
-                reviewer_name,
-                review.model_dump_json(by_alias=True),
-                _dt_out(utcnow()),
-            ),
-        )
-
-    def latest_review(self, artifact_id: str) -> tuple[Review, str, str] | None:
-        """(review, reviewer_id, reviewer_name) of the newest report for this artifact."""
-        row = self._db.execute(
-            "SELECT * FROM reviews WHERE artifact_id=? ORDER BY n DESC LIMIT 1", (artifact_id,)
-        ).fetchone()
-        if row is None:
-            return None
-        return (
-            Review.model_validate_json(row["report_json"]),
-            row["reviewer_id"],
-            row["reviewer_name"],
-        )
 
     # -- actions -----------------------------------------------------------------------------
 

@@ -1,8 +1,8 @@
-"""Pure pipelines: events in, Effects out (DDD §4.3, §7). No I/O in this module, ever.
+"""Pure pipelines: events in, Effects out (design v5 §5). No I/O in this module, ever.
 
 Inputs are a MessageEvent (parsed), a read-only View of the store, the policy and users files,
 the facts the runner read from the platform, and a clock. The only text interpreted here is the
-regex table in commands.py (§9) and the JSON inside ```sindarin-proposal / ```sindarin-review
+regex table in commands.py (§9) and the JSON inside ```sindarin-proposal
 fences (§8). Nothing else is input. Natural language is never interpreted.
 """
 
@@ -18,9 +18,16 @@ from pydantic import ValidationError
 
 from sindarin.adapters.base import ActionResult, Facts, VerifyResult
 from sindarin.executor import commands as cmd
-from sindarin.names import CODER, EXECUTOR_OF_KIND, GITHUB_EXECUTOR, REVIEWER, SWITCH_EXECUTOR
+from sindarin.names import (
+    ANALYST,
+    BOOKKEEPER,
+    EXECUTOR_OF_KIND,
+    LEDGER_EXECUTOR,
+    PLANNER,
+    SWITCH_EXECUTOR,
+)
 from sindarin.policy import (
-    FEATURE_ROOM,
+    PERIOD_ROOM,
     Policy,
     Rule,
     check_facts,
@@ -30,23 +37,24 @@ from sindarin.policy import (
 from sindarin.schema import (
     FAILURE_OF,
     IN_FLIGHT_STATES,
+    PLATFORM_OF,
     PROPOSAL_FENCE,
     RETRY_STATES,
-    REVIEW_FENCE,
     RUNNING_OF,
     SUCCESS_OF,
     WAITING_STATES,
     Artifact,
     Kind,
     Proposal,
-    Review,
     State,
     StatusFence,
     extract_fences,
     fmt_dt,
     has_fence,
     make_snapshot,
-    short_sha,
+    money,
+    percent,
+    sha256_hex,
 )
 from sindarin.store import MessageRecord
 from sindarin.switch.events import MessageEvent
@@ -114,14 +122,6 @@ class RecordApproval:
 
 
 @dataclass(frozen=True)
-class RecordReview:
-    artifact_id: str
-    review: Review
-    reviewer_id: str
-    reviewer_name: str
-
-
-@dataclass(frozen=True)
 class Execute:
     """Runner: adapter.execute → adapter.verify → core.after_execute()."""
 
@@ -149,7 +149,6 @@ Effect = (
     | Transition
     | UpdateSnapshot
     | RecordApproval
-    | RecordReview
     | Execute
     | Verify
     | SetValue
@@ -176,13 +175,12 @@ class View(Protocol):
     def by_thread(self, thread_id: str, *states: State) -> list[Artifact]: ...
     def in_states(self, *states: State, kind: Kind | None = None) -> list[Artifact]: ...
     def peek_next_id(self, kind: Kind) -> str: ...
-    def latest_review(self, artifact_id: str) -> tuple[Review, str, str] | None: ...
     def get_value(self, key: str) -> str | None: ...
 
 
 @dataclass(frozen=True)
 class Context:
-    executor: str  # handle: sindarin-switch | sindarin-github
+    executor: str  # handle: sindarin-switch | sindarin-ledger
     self_id: str
     policy: Policy
     users: Users
@@ -195,7 +193,7 @@ class Context:
     retry_after: timedelta = timedelta(hours=1)
     max_attempts: int = 2  # merge / publish: one retry (§1.4); rooms retry hourly for ever
     post_status_fences: bool = False
-    peer_artifacts: tuple[Artifact, ...] = ()  # the other executor's state (board, spec stages)
+    peer_artifacts: tuple[Artifact, ...] = ()  # the other executor's state (board, stages)
 
     @property
     def kinds(self) -> frozenset[Kind]:
@@ -209,9 +207,9 @@ class Context:
         return frozenset(ids)
 
     @property
-    def github_executor_id(self) -> str:
-        """sindarin-github's participant id: from policy, else the one configured peer."""
-        pid = self.policy.executor_id(GITHUB_EXECUTOR)
+    def ledger_executor_id(self) -> str:
+        """sindarin-ledger's participant id: from policy, else the one configured peer."""
+        pid = self.policy.executor_id(LEDGER_EXECUTOR)
         if pid:
             return pid
         peers = sorted(self.peer_ids)
@@ -294,65 +292,55 @@ def parse_proposal(text: str) -> tuple[Proposal | None, str | None]:
         return None, f"{loc}: {first.get('msg', 'invalid')}"
 
 
-def parse_review(text: str) -> tuple[Review | None, str | None]:
-    fences = extract_fences(text, REVIEW_FENCE)
-    if len(fences) != 1:
-        return None, f"expected exactly one fence, found {len(fences)}"
-    try:
-        data = json.loads(fences[0])
-    except ValueError as e:
-        return None, f"not JSON ({e.__class__.__name__})"
-    try:
-        return Review.model_validate(data), None
-    except ValidationError as e:
-        first = e.errors()[0]
-        loc = ".".join(str(x) for x in first.get("loc", ())) or "body"
-        return None, f"{loc}: {first.get('msg', 'invalid')}"
-
-
 def summarize(ctx: Context, a: Artifact) -> str:
-    """One line a person reads in the pending template (§7.4)."""
-    p = a.proposal()
-    body: Any = p.body
+    """One line a person reads in the pending template: ids and money, never digests."""
+    body: Any = a.proposal().body
     facts = a.facts()
-    if a.kind is Kind.SPEC:
+    if a.kind is Kind.GOALS:
         return (
-            f"{body.title} · {body.repo} · engineer {ctx.name_of(body.engineer)} · "
-            f"due {body.target_date.isoformat()}"
+            f"{body.title} · revenue target {money(body.revenue_target_cents, body.currency)} · "
+            f"margin {percent(body.margin_target_bps)} · cost cap "
+            f"{money(body.cost_cap_cents, body.currency)}"
         )
-    if a.kind is Kind.PR:
-        return (
-            f"#{body.number} {body.title} · `{body.branch}` → {facts.get('base', '?')} at "
-            f"`{short_sha(facts.get('head_sha'))}` · {body.spec}"
-        )
-    return f"{body.tag} at `{short_sha(body.target_sha)}` · {', '.join(body.specs)}"
+    if a.kind is Kind.BUDGET:
+        n = len(body.lines)
+        cap = facts.get("cap_cents")
+        under = f" under the cap {money(int(cap), body.currency)}" if cap is not None else ""
+        total = money(body.total_cents, body.currency)
+        return f"{n} line{'s' if n != 1 else ''} · {total}{under} · {body.goals}"
+    n = len(body.lines)
+    total = money(body.total_cents)
+    return f"period {body.period} · {n} line{'s' if n != 1 else ''} · {total} · {body.budget}"
 
 
 def action_phrase(a: Artifact, result: dict[str, Any]) -> str:
-    if a.kind is Kind.PR:
-        sha = short_sha(result.get("merge_commit_sha"))
-        return f"merged as `{sha}`" if sha else "merged"
-    if a.kind is Kind.RELEASE:
-        url = result.get("html_url")
-        return f"published {url}" if url else "published"
+    body: Any = a.proposal().body
+    if a.kind is Kind.BUDGET:
+        n = int(result.get("lines", len(body.lines)))
+        return (
+            f"recorded {money(body.total_cents, body.currency)} · {n} line{'s' if n != 1 else ''}"
+        )
+    if a.kind is Kind.ENTRIES:
+        n = int(result.get("lines_posted", len(body.lines)))
+        return f"{n} budget line{'s' if n != 1 else ''} posted · period {body.period} planned"
     room = result.get("room_name") or a.target
     return f"room **#{room.lstrip('#')}** opened"
 
 
-def _spec_plan(ctx: Context, proposal: Proposal, rule: Rule) -> dict[str, Any]:
-    """The membership a spec approval binds to (§7.2): the named engineer, the PM group, the
-    coder, the reviewer and sindarin-github. Computed from policy, never from chat text."""
-    body: Any = proposal.body
-    humans = [body.engineer] + [
-        pid for pid in ctx.policy.group_members(rule.approvers) if pid != body.engineer
-    ]
+def _goals_plan(ctx: Context, proposal: Proposal, rule: Rule) -> dict[str, Any]:
+    """The membership a goals approval binds to (design v5 §3): the cfo, the group the rule
+    also invites (the controllers), the planner, the bookkeeper, sindarin-ledger and
+    sindarin-switch. Computed from policy, never from chat text."""
+    humans = list(ctx.policy.group_members(rule.approvers))
+    if rule.also_invite:
+        humans += [p for p in ctx.policy.group_members(rule.also_invite) if p not in humans]
     agents = [
         pid
         for pid in (
-            ctx.policy.proposer_id(CODER),
-            ctx.policy.proposer_id(REVIEWER),
-            ctx.github_executor_id,
-            ctx.self_id,  # so the brief can be posted into the new room (§5, §7.2)
+            ctx.policy.proposer_id(PLANNER),
+            ctx.policy.proposer_id(BOOKKEEPER),
+            ctx.ledger_executor_id,
+            ctx.self_id,  # so the brief can be posted into the new room
         )
         if pid
     ]
@@ -360,59 +348,101 @@ def _spec_plan(ctx: Context, proposal: Proposal, rule: Rule) -> dict[str, Any]:
         "slug": proposal.target,
         "humans": humans,
         "agents": agents,
-        "instructions_sha": _spec_instructions_sha(proposal),
+        "instructions_sha": sha256_hex(plan_instructions(proposal)),
     }
 
 
-def _spec_instructions_sha(proposal: Proposal) -> str:
-    from sindarin.schema import sha256_hex
-
-    return sha256_hex(spec_instructions(proposal))
-
-
-def spec_instructions(proposal: Proposal) -> str:
-    """The room instructions text sindarin-switch sets on the feature room (§5, §7.2)."""
+def plan_instructions(proposal: Proposal) -> str:
+    """The room instructions sindarin-switch sets on the plan room: the goals."""
     body: Any = proposal.body
-    lines = [
-        f"# {body.title}",
+    cur = body.currency
+    lines = [f"# {body.title}", "", body.summary, ""]
+    if body.report:
+        lines += [f"## The basis: {body.basis}", *[f"- {r}" for r in body.report], ""]
+    lines += [
+        f"## Goals for {body.period}",
+        f"- Revenue target {money(body.revenue_target_cents, cur)}",
+        f"- Margin target {percent(body.margin_target_bps)}",
+        f"- Cost cap {money(body.cost_cap_cents, cur)}: the budget's lines sum under it",
         "",
-        body.press_release,
-        "",
-        "## FAQ",
-        *[f"- {q}" for q in body.faq],
-        "",
-        "## Acceptance criteria",
-        *[f"{i}. {c}" for i, c in enumerate(body.criteria, 1)],
-        "",
-        "## Scope",
-        f"In: {'; '.join(body.scope_in) or '-'}",
-        f"Out: {'; '.join(body.scope_out) or '-'}",
-        "",
-        f"Target date: {body.target_date.isoformat()} · Repository: {body.repo}",
-        "",
-        f"Merge is approved here with `@{GITHUB_EXECUTOR} approve PR-n`. "
-        "Agents propose; only the named engineer approves; the executor merges.",
+        f"The budget is approved in #planning with `@{LEDGER_EXECUTOR} approve BUDGET-n`; its "
+        f"register entries into the books of {body.period} are approved here with "
+        f"`@{LEDGER_EXECUTOR} approve ENTRIES-n`. Agents propose; only the named groups approve; "
+        "the executor acts.",
     ]
     return "\n".join(lines)
 
 
+def _goals_of(ctx: Context, proposal: Proposal) -> dict[str, Any]:
+    """The approved goals a budget answers, as the executor recorded them: the cap and the
+    targets (never from the fence). Empty when no such goals are open."""
+    body: Any = proposal.body
+    goals = _plan_named(ctx, body.goals)
+    if goals is None or goals.state not in (State.OPEN, State.DONE):
+        return {}
+    g: Any = goals.proposal().body
+    return {
+        "goals": goals.id,
+        "cap_cents": int(g.cost_cap_cents),
+        "revenue_target_cents": int(g.revenue_target_cents),
+        "margin_target_bps": int(g.margin_target_bps),
+    }
+
+
 def _live_facts(ctx: Context, a: Artifact, proposal: Proposal, rule: Rule) -> Facts:
-    if a.kind is Kind.SPEC:
-        return Facts(ok=True, data=_spec_plan(ctx, proposal, rule))
+    if a.kind is Kind.GOALS:
+        return Facts(ok=True, data=_goals_plan(ctx, proposal, rule))
     f = ctx.facts.get(proposal.target)
     if f is None:
         return Facts(ok=False, error="no fresh read of the target")
+    if f.ok and a.kind is Kind.BUDGET:
+        return Facts(ok=True, data={**f.data, **_goals_of(ctx, proposal)})
     return f
 
 
-def _what_changed(old: dict[str, Any], new: dict[str, Any]) -> str:
-    parts = []
+_MONEY_LABELS = {
+    "revenue_cents": "revenue",
+    "costs_cents": "costs",
+    "cap_cents": "cost cap",
+    "total_cents": "total",
+    "revenue_target_cents": "revenue target",
+}
+_PLAIN_LABELS = {"sales_rows": "sales rows", "period_status": "period", "basis_status": "basis"}
+
+
+def _what_changed(old: dict[str, Any], new: dict[str, Any], currency: str = "USD") -> str:
+    """What moved between the snapshot and the ledger now, in the words a person reads."""
+    parts: list[str] = []
+    if "budget_lines" in old or "budget_lines" in new:
+        before = {r["department"]: r for r in old.get("budget_lines", [])}
+        after = {r["department"]: r for r in new.get("budget_lines", [])}
+        for dep in sorted(set(before) | set(after)):
+            b, n = before.get(dep), after.get(dep)
+            if b == n:
+                continue
+            if b is None:
+                parts.append(f"{dep} appeared")
+            elif n is None:
+                parts.append(f"{dep} gone")
+            else:
+                was, now = money(b["amount_cents"], currency), money(n["amount_cents"], currency)
+                parts.append(f"{dep} {was} → {now}")
+    basis = new.get("basis") or old.get("basis")
     for k in sorted(set(old) | set(new)):
-        if old.get(k) != new.get(k):
-            o, n = old.get(k), new.get(k)
-            if k.endswith("sha") or k.endswith("head"):
-                o, n = short_sha(str(o or "")), short_sha(str(n or ""))
-            parts.append(f"{k} {o} → {n}")
+        if k in ("budget_lines", "digest", "accounts", "budget_id", "goals", "margin_target_bps"):
+            continue
+        if old.get(k) == new.get(k):
+            continue
+        if k in _MONEY_LABELS:
+            label = _MONEY_LABELS[k]
+            if k in ("revenue_cents", "costs_cents") and basis:
+                label = f"{basis} {label}"
+            parts.append(
+                f"{label} {money(int(old.get(k) or 0), currency)} → "
+                f"{money(int(new.get(k) or 0), currency)}"
+            )
+        else:
+            parts.append(f"{_PLAIN_LABELS.get(k, k)} {old.get(k)} → {new.get(k)}")
     return ", ".join(parts) or "snapshot"
 
 
@@ -427,7 +457,11 @@ def lookups(ctx: Context, ev: MessageEvent) -> list[Lookup]:
         return []
     if has_fence(ev.body, PROPOSAL_FENCE):
         proposal, _ = parse_proposal(ev.body)
-        if proposal is not None and proposal.kind in ctx.kinds and proposal.kind is not Kind.SPEC:
+        if (
+            proposal is not None
+            and proposal.kind in ctx.kinds
+            and PLATFORM_OF[proposal.kind] != "switch"
+        ):
             return [Lookup(proposal)]
         return []
     command = cmd.parse_command(ev.body, ctx.executor_names)
@@ -436,7 +470,7 @@ def lookups(ctx: Context, ev: MessageEvent) -> list[Lookup]:
         if (
             a is not None
             and a.kind in ctx.kinds
-            and a.kind is not Kind.SPEC
+            and PLATFORM_OF[a.kind] != "switch"
             and a.state in WAITING_STATES
         ):
             return [Lookup(a.proposal())]
@@ -452,15 +486,13 @@ def handle_message(ctx: Context, ev: MessageEvent) -> list[Effect]:
         return effects
     if has_fence(ev.body, PROPOSAL_FENCE):
         effects.extend(_handle_proposal(ctx, ev))
-    elif has_fence(ev.body, REVIEW_FENCE):
-        effects.extend(_handle_review(ctx, ev))
     else:
         effects.extend(_handle_command(ctx, ev))
     return effects
 
 
 def handle_sweep(ctx: Context) -> list[Effect]:
-    """Expiry, retries, crash recovery, derived spec stages, the daily board (§7.3, §14)."""
+    """Expiry, retries, crash recovery, the derived stages, the daily board."""
     effects: list[Effect] = []
     for a in ctx.view.in_states(*WAITING_STATES):
         if a.kind not in ctx.kinds:
@@ -488,13 +520,15 @@ def handle_sweep(ctx: Context) -> list[Effect]:
         if a.kind in ctx.kinds:
             effects.append(Verify(a.id))
     if ctx.executor == SWITCH_EXECUTOR:
-        effects.extend(_spec_stages(ctx))
+        effects.extend(_goals_stages(ctx))
         effects.extend(_daily_board(ctx))
+    else:
+        effects.extend(_ledger_stages(ctx))
     return effects
 
 
 # ---------------------------------------------------------------------------------------------
-# P — proposals (§7.1 P1–P5)
+# P — proposals (P1–P5)
 # ---------------------------------------------------------------------------------------------
 
 
@@ -506,14 +540,17 @@ def _reject(ctx: Context, ev: MessageEvent, code: str, text: str, **details: Any
 
 
 def _proposal_room_ok(ctx: Context, rule: Rule, room_id: str) -> bool:
-    if rule.room == FEATURE_ROOM:
+    if rule.room == PERIOD_ROOM:
         return room_id not in {v for v in ctx.policy.rooms.values() if v}
     return bool(ctx.policy.room_id(rule.room)) and room_id == ctx.policy.room_id(rule.room)
 
 
 def _rule_room_name(ctx: Context, rule: Rule, a: Artifact | None = None) -> str:
-    if rule.room == FEATURE_ROOM:
-        return ctx.room_name(a.room_id) if a else "the feature room"
+    if rule.room == PERIOD_ROOM:
+        return ctx.room_name(a.room_id) if a else "the period room"
+    room_id = ctx.policy.room_id(rule.room)
+    if room_id and (room_id in ctx.room_names or ctx.policy.room_key(room_id)):
+        return ctx.room_name(room_id)
     return ctx.room_names.get(rule.room, f"#{rule.room}")
 
 
@@ -548,9 +585,23 @@ def _handle_proposal(ctx: Context, ev: MessageEvent) -> list[Effect]:
     reason = check_target(ctx.policy, proposal)
     if reason is not None:
         return _reject(ctx, ev, "policy", f"policy: {reason}.", reason=reason)
-    # P4 — the snapshot comes from the platform, never from the fence
-    if proposal.kind is Kind.SPEC:
-        facts = Facts(ok=True, data=_spec_plan(ctx, proposal, rule))
+    thread = _reply_thread(ev)
+    existing = next(
+        (
+            a
+            for a in ctx.view.by_thread(thread, State.CHANGES_REQUESTED, State.PENDING)
+            if a.kind is proposal.kind
+        ),
+        None,
+    )
+    # order (design v5 §5): the budget follows its goals, the entries follow the recorded
+    # budget; one of each per period
+    reason = _order_check(ctx, proposal, thread)
+    if reason is not None:
+        return _reject(ctx, ev, "order", f"{reason}.", kind=proposal.kind.value)
+    # P4 — the snapshot comes from the ledger, never from the fence
+    if proposal.kind is Kind.GOALS:
+        facts = Facts(ok=True, data=_goals_plan(ctx, proposal, rule))
     else:
         facts = ctx.facts.get(proposal.target) or Facts(ok=False, error="target not read")
         if not facts.ok:
@@ -558,42 +609,24 @@ def _handle_proposal(ctx: Context, ev: MessageEvent) -> list[Effect]:
                 ctx,
                 ev,
                 "no_facts",
-                f"could not read {proposal.target} from {proposal.platform}: {facts.error}.",
+                f"could not read the ledger for {proposal.target}: {facts.error}.",
             )
-        if (
-            proposal.snapshot_hint
-            and proposal.kind is Kind.PR
-            and facts.data.get("head_sha") != proposal.snapshot_hint
-        ):
+        if proposal.snapshot_hint and facts.data.get("digest") != proposal.snapshot_hint:
             return _reject(
                 ctx,
                 ev,
                 "stale",
-                f"head is `{short_sha(facts.data.get('head_sha'))}`, the proposal names "
-                f"`{short_sha(proposal.snapshot_hint)}`; re-propose at the current head.",
+                "the ledger changed since this was prepared; propose again from the current rows.",
             )
+        if proposal.kind is Kind.BUDGET:
+            facts = Facts(ok=True, data={**facts.data, **_goals_of(ctx, proposal)})
         reason = check_facts(ctx.policy, proposal, facts.data)
         if reason is not None:
             return _reject(ctx, ev, "policy", f"{reason}.", reason=reason)
-    thread = _reply_thread(ev)
-    # P5 — id, pending, template. Re-proposals keep their id (§6.1 "on changes").
-    if proposal.kind is Kind.PR:
-        aid = f"PR-{proposal.body.number}"  # type: ignore[union-attr]
-        existing = ctx.view.get(aid)
-    else:
-        aid = ""
-        existing = next(
-            (
-                a
-                for a in ctx.view.by_thread(thread, State.CHANGES_REQUESTED, State.PENDING)
-                if a.kind is proposal.kind
-            ),
-            None,
-        )
+    # P5 — id, pending, template. Re-proposals keep their id.
     if existing is not None:
         return _reproposal(ctx, ev, existing, proposal, facts, rule)
-    if proposal.kind is not Kind.PR:
-        aid = ctx.view.peek_next_id(proposal.kind)
+    aid = ctx.view.peek_next_id(proposal.kind)
     snapshot = make_snapshot(aid, ev.sender, proposal, facts.data)
     artifact = Artifact(
         id=aid,
@@ -626,6 +659,52 @@ def _handle_proposal(ctx: Context, ev: MessageEvent) -> list[Effect]:
         Post(ev.room_id, pending_text(ctx, artifact, rule), thread_id=thread),
         *_status(ctx, artifact),
     ]
+
+
+def _plan_named(ctx: Context, goals_id: str) -> Artifact | None:
+    """The approved goals an artifact names, from the other executor's state (read-only)."""
+    pool = (
+        ctx.peer_artifacts
+        if Kind.GOALS not in ctx.kinds
+        else tuple(ctx.view.in_states(State.OPEN, State.DONE, kind=Kind.GOALS))
+    )
+    return next((a for a in pool if a.kind is Kind.GOALS and a.id == goals_id), None)
+
+
+def _order_check(ctx: Context, proposal: Proposal, thread: str) -> str | None:
+    body: Any = proposal.body
+    if proposal.kind is Kind.GOALS:
+        # one set of goals per period: pending, opening, open or done, another one is refused
+        taken = (*WAITING_STATES, *IN_FLIGHT_STATES, State.OPEN_FAILED, State.OPEN, State.DONE)
+        for a in ctx.view.in_states(*taken, kind=Kind.GOALS):
+            if a.period == body.period and a.thread_id != thread:
+                return f"**{a.id}** is already {a.state.value} for {body.period}"
+        return None
+    goals = _plan_named(ctx, body.goals)
+    if goals is None or goals.state not in (State.OPEN, State.DONE):
+        return f"{body.goals} are not approved goals yet; a {proposal.kind.value} follows the goals"
+    goals_body: Any = goals.proposal().body
+    if goals_body.period != body.period:
+        return f"{body.goals} is for {goals_body.period}, not {body.period}"
+    live = (*WAITING_STATES, *IN_FLIGHT_STATES, *RETRY_STATES)
+    if proposal.kind is Kind.BUDGET:
+        for a in ctx.view.in_states(*live, State.RECORDED, kind=Kind.BUDGET):
+            if a.proposal().body.goals == body.goals and a.thread_id != thread:
+                return f"**{a.id}** is already {a.state.value} for {body.goals}"
+        return None
+    recorded = [
+        a
+        for a in ctx.view.in_states(State.RECORDED, kind=Kind.BUDGET)
+        if a.proposal().body.goals == body.goals
+    ]
+    if not recorded:
+        return f"no budget is recorded for {body.goals} yet; the entries follow the budget"
+    if body.budget not in {a.id for a in recorded}:
+        return f"{body.budget} is not the recorded budget of {body.goals}"
+    for a in ctx.view.in_states(*live, kind=Kind.ENTRIES):
+        if a.proposal().body.goals == body.goals and a.thread_id != thread:
+            return f"**{a.id}** is already {a.state.value} for {body.goals}"
+    return None
 
 
 def _reproposal(
@@ -678,91 +757,24 @@ def _reproposal(
 
 
 def pending_text(ctx: Context, a: Artifact, rule: Rule, *, revised: bool = False) -> str:
-    """§7.4 `pending` (plus `review shown` when a review exists)."""
+    """The `pending` template: one id, money, the group, the room, the three commands."""
     room = _rule_room_name(ctx, rule, a)
     head = f"**{a.id}** pending" + (" (revised, approvals cleared)" if revised else "")
-    text = (
-        f"{head} · {summarize(ctx, a)} · needs one {rule.approvers} approver in {room}. "
+    return (
+        f"{head} · {summarize(ctx, a)} · needs {_approver_phrase(ctx, rule, a)} in {room}. "
         f"`@{ctx.executor} approve {a.id}` / `deny {a.id} <reason>` / `changes {a.id} <note>`"
     )
-    review = ctx.view.latest_review(a.id)
-    if review is not None:
-        text += "\n" + review_text(ctx, a, review[0], review[1], review[2])
-    return text
 
 
-def review_text(ctx: Context, a: Artifact, r: Review, reviewer_id: str, reviewer_name: str) -> str:
-    who = ctx.name_of(reviewer_id, reviewer_name)
+def _approver_phrase(ctx: Context, rule: Rule, a: Artifact) -> str:
+    total = a.facts().get("total_cents") if a.kind is Kind.BUDGET else None
+    groups = rule.approver_groups(int(total) if total is not None else None)
+    if len(groups) == 1:
+        return f"one {groups[0]} approver"
     return (
-        f"**{a.id}** last review: **{r.met} of {r.total}** criteria met at "
-        f"`{short_sha(r.head_sha)}` by {who}."
+        f"one {groups[0]} or {groups[1]} approver "
+        f"(under {money(rule.limit_cents or 0, rule.currency)})"
     )
-
-
-# ---------------------------------------------------------------------------------------------
-# reviews (§6.3, §7.1)
-# ---------------------------------------------------------------------------------------------
-
-
-def _handle_review(ctx: Context, ev: MessageEvent) -> list[Effect]:
-    if Kind.PR not in ctx.kinds:
-        return [
-            Post(
-                ev.room_id,
-                f"Review not recorded — reviews go to @{GITHUB_EXECUTOR}.",
-                thread_id=_reply_thread(ev),
-            ),
-            _audit(ev, "rejected_review:wrong_executor"),
-        ]
-    reviewer = ctx.policy.proposer_id(REVIEWER)
-    if not reviewer or ev.sender != reviewer:
-        return [
-            Post(
-                ev.room_id,
-                f"Review not recorded — only {REVIEWER} posts reviews.",
-                thread_id=_reply_thread(ev),
-            ),
-            _audit(ev, "rejected_review:bad_sender"),
-        ]
-    review, reason = parse_review(ev.body)
-    if review is None:
-        return [
-            Post(ev.room_id, f"Review not recorded — malformed: {reason}.", _reply_thread(ev)),
-            _audit(ev, "rejected_review:malformed"),
-        ]
-    a = ctx.view.get(review.pr)
-    if a is None or a.kind is not Kind.PR:
-        return [
-            Post(
-                ev.room_id, f"Review not recorded — {review.pr} is unknown here.", _reply_thread(ev)
-            ),
-            _audit(ev, "rejected_review:unknown", review.pr),
-        ]
-    if a.room_id != ev.room_id:
-        return [
-            Post(
-                ev.room_id,
-                f"Review not recorded — {a.id} lives in {ctx.room_name(a.room_id)}.",
-                _reply_thread(ev),
-            ),
-            _audit(ev, "rejected_review:wrong_room", a.id),
-        ]
-    stale = review.head_sha != a.facts().get("head_sha")
-    text = review_text(ctx, a, review, ev.sender, ev.sender_name)
-    if stale:
-        text += f" The pending head is `{short_sha(a.facts().get('head_sha'))}`."
-    return [
-        RecordReview(a.id, review, ev.sender, ev.sender_name),
-        _audit(
-            ev,
-            "review_recorded",
-            a.id,
-            head_sha=review.head_sha,
-            met=review.met,
-            total=review.total,
-        ),
-        Post(ev.room_id, text, thread_id=a.thread_id),
-    ]
 
 
 # ---------------------------------------------------------------------------------------------
@@ -795,13 +807,15 @@ def _handle_command(ctx: Context, ev: MessageEvent) -> list[Effect]:
             if a is None or a.kind not in ctx.kinds:
                 return [Post(ev.room_id, f"**{aid}** is unknown here.", thread_id=thread)]
             return [Post(ev.room_id, _status_one(ctx, a), thread_id=thread)]
+        case cmd.Brief():
+            return _brief(ctx, ev)
         case cmd.Board():
             if ctx.executor != SWITCH_EXECUTOR:
                 return [
                     Post(
                         ev.room_id,
                         f"The board is kept by @{SWITCH_EXECUTOR} in "
-                        f"{ctx.room_names.get('product', '#product')}.",
+                        f"{ctx.room_name(ctx.policy.room_id('finance'))}.",
                         thread_id=thread,
                     )
                 ]
@@ -825,7 +839,7 @@ def _gate(
     """A2–A5, shared by approve, deny and changes. Returns (artifact, rule, refusal effects)."""
     a = ctx.view.get(aid)
     if a is None or a.kind not in ctx.kinds:
-        owner = EXECUTOR_OF_KIND.get((aid.split("-", 1)[0] or "").lower().replace("rel", "release"))
+        owner = EXECUTOR_OF_KIND.get((aid.split("-", 1)[0] or "").lower())
         hint = f" Try @{owner}." if owner and owner != ctx.executor else ""
         return (
             None,
@@ -854,23 +868,32 @@ def _gate(
                 aid,
             ),
         )
-    # A2 — the group the rule names, by participant id
-    if not ctx.policy.in_group(ev.sender, rule.approvers):
+    # A2 — the group the rule names, by participant id; a budget rule may admit a second group
+    # below its limit, judged on the total the executor read, never on the fence
+    total = a.facts().get("total_cents") if a.kind is Kind.BUDGET else None
+    allowed = rule.approver_groups(int(total) if total is not None else None)
+    if not any(ctx.policy.in_group(ev.sender, g) for g in allowed):
+        text = f"**{aid}** not applied — {name} is not in the {rule.approvers} group."
+        if (
+            rule.limit_cents is not None
+            and rule.approvers_under_limit
+            and total is not None
+            and ctx.policy.in_group(ev.sender, rule.approvers_under_limit)
+        ):
+            text = (
+                f"**{aid}** not applied — {money(int(total), rule.currency)} needs the "
+                f"{rule.approvers} group; {rule.approvers_under_limit} may approve up to "
+                f"{money(rule.limit_cents, rule.currency)}."
+            )
         return (
             None,
             None,
-            _refuse(
-                ev,
-                f"refused_{verb}:not_approver",
-                f"**{aid}** not applied — {name} is not in the {rule.approvers} group.",
-                aid,
-                group=rule.approvers,
-            ),
+            _refuse(ev, f"refused_{verb}:not_approver", text, aid, group=rule.approvers),
         )
     # A5 — the room the rule names
     room_ok = (
         ev.room_id == a.room_id
-        if rule.room == FEATURE_ROOM
+        if rule.room == PERIOD_ROOM
         else ev.room_id == ctx.policy.room_id(rule.room)
     )
     if not room_ok:
@@ -920,22 +943,12 @@ def _gate(
 
 
 def _self_check(ctx: Context, ev: MessageEvent, a: Artifact) -> list[Effect]:
-    """A3, second half: not the proposer, and not the PR author when the author is a person."""
-    name = ctx.name_of(ev.sender, ev.sender_name)
+    """A3, second half: the one who proposed never approves."""
     if ev.sender == a.proposer_id:
+        name = ctx.name_of(ev.sender, ev.sender_name)
         return _refuse(
             ev, "refused_approval:self", f"**{a.id}** not applied — {name} proposed it.", a.id
         )
-    if a.kind is Kind.PR:
-        author = a.facts().get("author_login") or ""
-        if author and ctx.users.id_for_login(author) == ev.sender:
-            return _refuse(
-                ev,
-                "refused_approval:self",
-                f"**{a.id}** not applied — {name} opened this pull request.",
-                a.id,
-                author_login=author,
-            )
     return []
 
 
@@ -947,7 +960,7 @@ def _approve(ctx: Context, ev: MessageEvent, aid: str) -> list[Effect]:
     if refusal:
         return refusal
     name = ctx.name_of(ev.sender, ev.sender_name)
-    # A6 — snapshot unchanged: re-read from the platform (or recomputed from policy for a spec)
+    # A6 — snapshot unchanged: re-read from the platform (or recomputed from policy for goals)
     proposal = a.proposal()
     live = _live_facts(ctx, a, proposal, rule)
     if not live.ok:
@@ -959,7 +972,7 @@ def _approve(ctx: Context, ev: MessageEvent, aid: str) -> list[Effect]:
         )
     snapshot = make_snapshot(a.id, a.proposer_id, proposal, live.data)
     if snapshot.hash != a.snapshot_sha:
-        what = _what_changed(a.facts(), live.data)
+        what = _what_changed(a.facts(), live.data, getattr(proposal.body, "currency", "USD"))
         return [
             UpdateSnapshot(
                 a.id,
@@ -972,15 +985,14 @@ def _approve(ctx: Context, ev: MessageEvent, aid: str) -> list[Effect]:
             ),
             Post(
                 ev.room_id,
-                f"**{aid}** changed since it was proposed ({what}). "
-                "Approvals cleared; it is pending again.",
+                f"**{aid}** changed since it was proposed: {what}. "
+                f"Approvals cleared; @{ctx.name_of(a.proposer_id)} please propose again.",
                 thread_id=a.thread_id,
             ),
             *_refuse(
                 ev,
                 "refused_approval:snapshot_changed",
-                f"**{aid}** not applied — it changed since it was proposed; "
-                "review the new snapshot and approve again.",
+                f"**{aid}** not applied — the ledger changed since the proposal ({what}).",
                 aid,
             ),
         ]
@@ -1098,13 +1110,13 @@ def after_execute(ctx: Context, a: Artifact, result: ActionResult, verified: boo
                 f"verified at **{ctx.now:%H:%M:%S} UTC**.",
                 thread_id=a.thread_id,
             ),
-            *_spec_opened(ctx, a, result.data),
+            *_goals_opened(ctx, a, result.data),
             *_status(ctx, a, SUCCESS_OF[a.kind]),
         ]
     error = result.error or ("not visible on read-back" if result.ok else "unknown platform error")
     action = a.proposal().action.replace("_", " ")
     failed = FAILURE_OF[a.kind]
-    if a.kind is Kind.SPEC or a.attempts < ctx.max_attempts:
+    if a.kind is Kind.GOALS or a.attempts < ctx.max_attempts:
         wait = int(ctx.retry_after.total_seconds() // 60)
         return [
             Transition(a.id, failed, {"error": error, "failed_at": ctx.now}),
@@ -1133,38 +1145,83 @@ def after_execute(ctx: Context, a: Artifact, result: ActionResult, verified: boo
     ]
 
 
-def _spec_opened(ctx: Context, a: Artifact, result: dict[str, Any]) -> list[Effect]:
-    """§7.2: post the room's existence in #product with its members, and the spec into the new
-    room as its first message (the brief every agent in it reads; Appendix C)."""
-    if a.kind is not Kind.SPEC:
+def _goals_opened(ctx: Context, a: Artifact, result: dict[str, Any]) -> list[Effect]:
+    """Post the room's existence in #acme-finance with its members, and the goals into the new
+    room as its first message (the brief every agent in it reads)."""
+    if a.kind is not Kind.GOALS:
         return []
     plan = a.facts()
+    body: Any = a.proposal().body
     people = ", ".join(ctx.name_of(p) for p in plan.get("humans", []))
     agents = ", ".join(ctx.name_of(p) for p in plan.get("agents", []))  # no mentions: not in here
     room = result.get("room_name") or a.target
+    budget_rule = next(iter(ctx.policy.rules_for(Kind.BUDGET)), None)
+    entries_rule = next(iter(ctx.policy.rules_for(Kind.ENTRIES)), None)
+    budget_by = budget_rule.approvers if budget_rule else "cfo"
+    if budget_rule and budget_rule.approvers_under_limit:
+        budget_by = (
+            f"{budget_rule.approvers_under_limit} (the {budget_rule.approvers} above the limit)"
+        )
+    entries_by = entries_rule.approvers if entries_rule else "controllers"
     effects: list[Effect] = [
         Post(
             a.room_id,
-            f"**{a.id}** feature room **#{room.lstrip('#')}** is open · people: {people} · "
-            f"agents: {agents} · instructions: the spec. The merge is approved there, by "
-            f"{ctx.name_of(a.proposal().body.engineer)}, with `approve PR-n` to {GITHUB_EXECUTOR}.",
+            f"**{a.id}** plan room **#{room.lstrip('#')}** is open · people: {people} · "
+            f"agents: {agents} · instructions: the goals. The budget is approved in "
+            f"{ctx.room_name(ctx.policy.room_id('planning'))} by {budget_by}; its register "
+            f"entries into the books of {body.period} are approved in the plan room by "
+            f"{entries_by}, both to @{LEDGER_EXECUTOR}.",
             thread_id=a.thread_id,
         )
     ]
     new_room = result.get("room_id")
     if new_room:
-        body: Any = a.proposal().body
-        engineer = ctx.name_of(body.engineer)
-        approver = ctx.name_of(a.approver_id or "")
-        effects.append(
-            Post(
-                str(new_room),
-                f"@{CODER} **{a.id}** instructions · approved by {approver} · engineer {engineer} "
-                f"approves the merge with `@{GITHUB_EXECUTOR} approve PR-n`.\n"
-                f"{spec_instructions(a.proposal())}",
-            )
-        )
+        effects.append(Post(str(new_room), brief_text(ctx, a, f"@{PLANNER} @{BOOKKEEPER}")))
     return effects
+
+
+def brief_text(ctx: Context, a: Artifact, mention: str) -> str:
+    """The goals as the plan room's brief: posted when the room opens, and again to whoever
+    asks `brief` (an agent the bridge had not synced yet, a person, a restarted agent)."""
+    approver = ctx.name_of(a.approver_id or "")
+    return (
+        f"{mention} **{a.id}** instructions · approved by {approver} · period {a.period}.\n"
+        f"{plan_instructions(a.proposal())}"
+    ).strip()
+
+
+def plan_for_room(ctx: Context, room_id: str) -> Artifact | None:
+    """The goals whose plan room this is, from the executor's own record of what it opened."""
+    for a in ctx.view.in_states(
+        State.OPENING, State.OPEN, State.OPEN_FAILED, State.DONE, kind=Kind.GOALS
+    ):
+        if a.result().get("room_id") == room_id:
+            return a
+    return None
+
+
+def _brief(ctx: Context, ev: MessageEvent) -> list[Effect]:
+    thread = _reply_thread(ev)
+    if ctx.executor != SWITCH_EXECUTOR:
+        return [
+            Post(
+                ev.room_id,
+                f"The goals are kept by @{SWITCH_EXECUTOR}: ask it with "
+                f"`@{SWITCH_EXECUTOR} brief`.",
+                thread_id=thread,
+            )
+        ]
+    plan = plan_for_room(ctx, ev.room_id)
+    if plan is None:
+        return [
+            Post(
+                ev.room_id,
+                "No goals opened this room; `brief` works in a plan room.",
+                thread_id=thread,
+            )
+        ]
+    mention = f"@{ev.sender_name}" if ev.sender_name else ""
+    return [Post(ev.room_id, brief_text(ctx, plan, mention))]
 
 
 def after_verify(ctx: Context, a: Artifact, v: VerifyResult) -> list[Effect]:
@@ -1180,61 +1237,95 @@ def after_verify(ctx: Context, a: Artifact, v: VerifyResult) -> list[Effect]:
 
 
 # ---------------------------------------------------------------------------------------------
-# derived spec stages and the board (§7.3, §14) — sindarin-switch only
+# derived stages and the board — the two executors' sweeps
 # ---------------------------------------------------------------------------------------------
 
 
-def _spec_stages(ctx: Context) -> list[Effect]:
-    """open → done when a merged PR names the spec; done → released when a published release
-    lists it. Read from the other executor's state, never from its messages (§4.3 rule 6)."""
+def _goals_stages(ctx: Context) -> list[Effect]:
+    """open → done when the period's register entries are posted. Read from the other
+    executor's state, never from its messages. The stage line wakes the analyst."""
     effects: list[Effect] = []
-    merged = {
-        a.proposal().body.spec: a.id  # type: ignore[union-attr]
-        for a in ctx.peer_artifacts
-        if a.kind is Kind.PR and a.state is State.MERGED
-    }
-    released: dict[str, str] = {}
+    planned: dict[str, Artifact] = {}
     for a in ctx.peer_artifacts:
-        if a.kind is Kind.RELEASE and a.state is State.PUBLISHED:
-            for s in a.proposal().body.specs:  # type: ignore[union-attr]
-                released.setdefault(s, a.id)
-    for spec in ctx.view.in_states(State.OPEN, kind=Kind.SPEC):
-        if spec.id in merged:
+        if a.kind is Kind.ENTRIES and a.state is State.PLANNED:
+            planned.setdefault(a.proposal().body.goals, a)  # type: ignore[union-attr]
+    for goals in ctx.view.in_states(State.OPEN, kind=Kind.GOALS):
+        entries = planned.get(goals.id)
+        if entries is None:
+            continue
+        effects += [
+            Transition(goals.id, State.DONE),
+            Audit("goals_done", goals.id, details={"entries": entries.id}),
+            Post(
+                goals.room_id,
+                f"**{goals.id}** done · {entries.id} applied · period {goals.period} is planned. "
+                f"@{ANALYST} tell the business.",
+                goals.thread_id,
+            ),
+        ]
+    return effects
+
+
+def _ledger_stages(ctx: Context) -> list[Effect]:
+    """Hand the work on (design v5 §5): once the goals are approved, call the planner in
+    #planning; once the budget is recorded, call the bookkeeper in the plan room. Each line is
+    posted once and recorded in the store; it is the only way a machine wakes an agent."""
+    effects: list[Effect] = []
+    planning = ctx.policy.room_id("planning")
+    recorded = [a for a in ctx.view.in_states(State.RECORDED, kind=Kind.BUDGET)]
+    for goals in ctx.peer_artifacts:
+        if goals.kind is not Kind.GOALS or goals.state not in (State.OPEN, State.DONE):
+            continue
+        body: Any = goals.proposal().body
+        room = str(goals.result().get("room_id") or "")
+        if planning and ctx.view.get_value(f"stage:budget:{goals.id}") is None:
             effects += [
-                Transition(spec.id, State.DONE),
-                Audit("spec_done", spec.id, details={"pr": merged[spec.id]}),
+                SetValue(f"stage:budget:{goals.id}", ctx.now.isoformat()),
                 Post(
-                    spec.room_id, f"**{spec.id}** done · {merged[spec.id]} merged.", spec.thread_id
+                    planning,
+                    f"**{goals.id}** approved · revenue target "
+                    f"{money(body.revenue_target_cents, body.currency)} · cost cap "
+                    f"{money(body.cost_cap_cents, body.currency)} for {body.period}. "
+                    f"@{PLANNER} propose the budget.",
                 ),
+                Audit("stage_line", goals.id, details={"stage": "budget"}),
             ]
-    for spec in ctx.view.in_states(State.DONE, kind=Kind.SPEC):
-        if spec.id in released:
+        mine = [a for a in recorded if a.proposal().body.goals == goals.id]  # type: ignore[union-attr]
+        if (
+            mine
+            and room
+            and goals.state is State.OPEN
+            and ctx.view.get_value(f"stage:entries:{goals.id}") is None
+        ):
+            b: Any = mine[0].proposal().body
+            n = len(b.lines)
             effects += [
-                Transition(spec.id, State.RELEASED),
-                Audit("spec_released", spec.id, details={"release": released[spec.id]}),
+                SetValue(f"stage:entries:{goals.id}", ctx.now.isoformat()),
                 Post(
-                    spec.room_id,
-                    f"**{spec.id}** released in {released[spec.id]}.",
-                    spec.thread_id,
+                    room,
+                    f"**{mine[0].id}** recorded · {n} line{'s' if n != 1 else ''}, "
+                    f"{money(b.total_cents, b.currency)} under the cap · period {body.period} "
+                    f"is ready for its entries. @{BOOKKEEPER} propose the budget register entries.",
                 ),
+                Audit("stage_line", goals.id, details={"stage": "entries"}),
             ]
     return effects
 
 
 def _daily_board(ctx: Context) -> list[Effect]:
     today = ctx.now.strftime("%Y-%m-%d")
-    if ctx.view.get_value("board_date") == today or not ctx.policy.room_id("product"):
+    if ctx.view.get_value("board_date") == today or not ctx.policy.room_id("finance"):
         return []
     return [
         SetValue("board_date", today),
-        Post(ctx.policy.room_id("product"), board_text(ctx)),
+        Post(ctx.policy.room_id("finance"), board_text(ctx)),
         Audit("board_posted", details={"date": today}),
     ]
 
 
 def _post_board(ctx: Context, ev: MessageEvent) -> list[Effect]:
     today = ctx.now.strftime("%Y-%m-%d")
-    room = ctx.policy.room_id("product") or ev.room_id
+    room = ctx.policy.room_id("finance") or ev.room_id
     return [
         SetValue("board_date", today),
         Post(room, board_text(ctx)),
@@ -1262,10 +1353,8 @@ def _waiting_on(ctx: Context, a: Artifact) -> str:
         return "retry"
     if a.state in IN_FLIGHT_STATES:
         return "executor"
-    if a.kind is Kind.SPEC and a.state is State.OPEN:
-        return f"{CODER} and {ctx.name_of(a.proposal().body.engineer)}"  # type: ignore[union-attr]
-    if a.kind is Kind.SPEC and a.state is State.DONE:
-        return "release"
+    if a.kind is Kind.GOALS and a.state is State.OPEN:
+        return f"{PLANNER} and {BOOKKEEPER}"
     return "-"
 
 
@@ -1334,9 +1423,6 @@ def _status_one(ctx: Context, a: Artifact) -> str:
         lines.append(f"note: {a.note}")
     if a.error:
         lines.append(f"error: {a.error}")
-    review = ctx.view.latest_review(a.id)
-    if review is not None:
-        lines.append(review_text(ctx, a, *review))
     if a.result_json:
         lines.append(action_phrase(a, a.result()))
     return "\n".join(lines)
