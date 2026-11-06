@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import argparse
 import re
-import subprocess
 import sys
 import time
 from pathlib import Path
@@ -26,6 +25,7 @@ from sindarin.executor.config import parse_env_text  # noqa: E402
 from sindarin.switch.mattermost import MattermostClient, MattermostError  # noqa: E402
 
 PERIOD = "2026-11"
+BASIS = "2026-10"
 PERIOD_ROOM = f"plan-{PERIOD}"
 PEOPLE = ("isaac", "leonardo", "john", "vincent")
 
@@ -137,7 +137,7 @@ def main() -> int:
     p.add_argument(
         "--no-sale",
         action="store_true",
-        help="skip the 'a late sale landed between proposal and approval' moment",
+        help="skip the 'the books moved between proposal and approval' moment",
     )
     p.add_argument(
         "--from",
@@ -145,6 +145,13 @@ def main() -> int:
         choices=("ask", "budget", "entries"),
         default="ask",
         help="resume at a later gate when the earlier ones already happened",
+    )
+    p.add_argument(
+        "--chain",
+        choices=("plan", "close", "sales"),
+        default="plan",
+        help="which chain to play: the planning cycle (plan), the month-end close (close) or a "
+        "deal through the discount band (sales)",
     )
     a = p.parse_args()
     sys.stdout.reconfigure(line_buffering=True)
@@ -154,12 +161,85 @@ def main() -> int:
     stage = Stage(target.url, target.team_name, a.demo_pass, a.wait)
     stage.login(target.admin_user, target.admin_password)
 
+    if a.chain == "close":
+        run_close_chain(stage, amend=not a.no_sale)
+        return 0
+    if a.chain == "sales":
+        run_sales_chain(stage, reprice=not a.no_sale)
+        return 0
     if a.start == "ask":
         run_ask_and_goals(stage)
     if a.start in ("ask", "budget"):
         run_budget(stage, sale=not a.no_sale)
     run_entries_and_note(stage)
     return 0
+
+
+def run_sales_chain(stage: Stage, *, reprice: bool) -> None:
+    """The sales chain: a deal at 15% off needs the cfo (the controller is refused with the
+    discount and the limit); a list price edited in chat under the pending deal refuses the
+    stale approval; the re-proposal is won and the sale lands in the open month."""
+    ask = stage.say("vincent", "sales", "@sales deal Contoso Ltd on Team at 10,200.00")
+    posts = stage.watch("sales", until=r"\*\*DEAL-\d+\*\* pending", wait=stage.wait * 2)
+    deal = pending_id(posts, "DEAL", "DEAL-1")
+    root = stage.proposal_root("sales") or ask["id"]
+    stage.say("leonardo", "sales", f"@sindarin-ledger approve {deal}", root_id=root)
+    stage.watch("sales", until=r"discount needs the cfo group")
+    if reprice:
+        stage.say("john", "sales", "@sindarin-ledger price Team 12500.00", root_id=root)
+        stage.watch("sales", until=r"list price is now 12,500.00 USD")
+        stage.say("john", "sales", f"@sindarin-ledger approve {deal}", root_id=root)
+        stage.watch("sales", until=r"the ledger changed since the proposal")
+        stage.watch("sales", until=r"\*\*DEAL-\d+\*\* pending \(revised", wait=stage.wait * 2)
+    stage.say("john", "sales", f"@sindarin-ledger approve {deal}", root_id=root)
+    stage.watch("sales", until=r"approved by John · won", wait=stage.wait * 2)
+    posts = stage.watch("acme-finance", until=rf"\*\*{deal}\*\* won", wait=stage.wait)
+    landed = re.search(r"landed in (\d{4}-\d{2})", " ".join(p.get("message", "") for p in posts))
+    period = landed.group(1) if landed else BASIS
+    stage.say("john", "acme-finance", f"@sindarin-switch chart {period} deals")
+    stage.watch("acme-finance", until=r"deals by account")
+    print("\nrehearsal done")
+
+
+def run_close_chain(stage: Stage, *, amend: bool) -> None:
+    """The month-end chain: the plan, the payment run (the limit, a payable amended under the
+    run), the lock, the closing note."""
+    import subprocess
+
+    close_room = f"close-{BASIS}"
+    ask = stage.say("isaac", "acme-finance", "@analyst @bookkeeper close October")
+    posts = stage.watch("acme-finance", until=r"\*\*CLOSE-\d+\*\* pending", wait=stage.wait * 2)
+    plan = pending_id(posts, "CLOSE", "CLOSE-1")
+    stage.say("vincent", "acme-finance", f"@sindarin-switch approve {plan}", root_id=ask["id"])
+    stage.watch("acme-finance", until=r"is not in the controllers group")
+    stage.say("leonardo", "acme-finance", f"@sindarin-switch approve {plan}", root_id=ask["id"])
+    stage.watch("acme-finance", until=rf"period room \*\*#{close_room}\*\* is open")
+    posts = stage.watch("payments", until=r"\*\*PAY-\d+\*\* pending", wait=stage.wait * 2)
+    pay = pending_id(posts, "PAY", "PAY-1")
+    root = stage.proposal_root("payments")
+    stage.say("leonardo", "payments", f"@sindarin-ledger approve {pay}", root_id=root)
+    stage.watch("payments", until=r"needs the cfo group")
+    if amend:
+        print("\n>>> (the books move) uv run sindarin ledger amend INV-1042 --amount 4900.00")
+        subprocess.run(
+            ["uv", "run", "sindarin", "ledger", "amend", "INV-1042", "--amount", "4900.00"],
+            cwd=REPO,
+            check=False,
+        )
+        stage.say("john", "payments", f"@sindarin-ledger approve {pay}", root_id=root)
+        stage.watch("payments", until=r"the ledger changed since the proposal")
+        stage.watch("payments", until=r"\*\*PAY-\d+\*\* pending \(revised", wait=stage.wait * 2)
+    stage.say("john", "payments", f"@sindarin-ledger approve {pay}", root_id=root)
+    stage.watch("payments", until=r"approved by John · paid", wait=stage.wait * 2)
+    posts = stage.watch(close_room, until=r"\*\*LOCK-\d+\*\* pending", wait=stage.wait * 2)
+    lock = pending_id(posts, "LOCK", "LOCK-1")
+    root = stage.proposal_root(close_room)
+    stage.say("leonardo", close_room, f"@sindarin-ledger approve {lock}", root_id=root)
+    stage.watch(close_room, until=r"approved by Leonardo · .* locked", wait=stage.wait * 2)
+    stage.watch("acme-finance", until=r"(?<!2026-10 )is \*{0,2}locked", wait=stage.wait * 2)
+    stage.say("leonardo", "acme-finance", "@sindarin-switch board")
+    stage.watch("acme-finance", until=r"\*\*Board\*\*")
+    print("\nrehearsal done")
 
 
 def run_ask_and_goals(stage: Stage) -> None:
@@ -182,12 +262,14 @@ def run_budget(stage: Stage, *, sale: bool) -> None:
     stage.say("john", "planning", f"@sindarin-ledger approve {budget}", root_id=root)
     stage.watch("planning", until=r"needs the board group")
     if sale:
-        print("\n>>> (the books move) uv run sindarin ledger add-sale S-2026-1055 --amount 3980.00")
-        subprocess.run(
-            ["uv", "run", "sindarin", "ledger", "add-sale", "S-2026-1055", "--amount", "3980.00"],
-            cwd=REPO,
-            check=False,
+        # the books move, from chat: a late October sale typed to the ledger executor
+        stage.say(
+            "isaac",
+            "planning",
+            "@sindarin-ledger sale S-2026-1055 3980.00 Contoso Ltd",
+            root_id=root,
         )
+        stage.watch("planning", until=r"landed in 2026-10")
         stage.say("isaac", "planning", f"@sindarin-ledger approve {budget}", root_id=root)
         stage.watch("planning", until=r"the ledger changed since the proposal")
         stage.watch("planning", until=r"\*\*BUDGET-\d+\*\* pending \(revised", wait=stage.wait * 2)
@@ -204,7 +286,7 @@ def run_entries_and_note(stage: Stage) -> None:
     stage.watch(PERIOD_ROOM, until=r"approved by Leonardo · .* planned", wait=stage.wait * 2)
     # 60–70 s · the business is told, the board
     # the analyst's note, not the stage line that woke it ("period 2026-11 is planned")
-    stage.watch("acme-finance", until=r"(?<!period 2026-11 )is planned", wait=stage.wait * 2)
+    stage.watch("acme-finance", until=r"(?<!period 2026-11 )is \*{0,2}planned", wait=stage.wait * 2)
     stage.say("leonardo", "acme-finance", "@sindarin-switch board")
     stage.watch("acme-finance", until=r"\*\*Board\*\*")
     print("\nrehearsal done")

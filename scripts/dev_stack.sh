@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run the five Sindarin processes in the background: two executors, three agents.
+# Run the seven Sindarin processes in the background: two executors, five agents.
 #   scripts/dev_stack.sh start [--fake]   # --fake: agents on the stand-in model (no model key)
 #   scripts/dev_stack.sh stop
 #   scripts/dev_stack.sh status
@@ -8,7 +8,7 @@ set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO"
 EXECUTORS=(switch ledger)
-AGENTS=(analyst planner bookkeeper)
+AGENTS=(analyst planner bookkeeper treasury sales)
 
 start_one() { # name, pattern, command...
   local name="$1" pat="$2"; shift 2

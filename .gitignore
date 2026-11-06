@@ -8,7 +8,7 @@ __pycache__/
 build/
 dist/
 .DS_Store
-# secrets and local state (DDD §16.2): one env file for the six processes, one state file per executor
+# secrets and local state (DDD §16.2): one env file for the seven processes, one state file per executor
 /.env
 .env.local
 agents/*/.claude/
@@ -16,7 +16,6 @@ executor/*.db
 executor/*.db-journal
 executor/*.db-shm
 executor/*.db-wal
-executor/simulated-github.json
 executor/*.log
 
 # documentation stays local: only the READMEs and the agents' prompts are published
