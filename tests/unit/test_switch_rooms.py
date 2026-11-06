@@ -1,40 +1,55 @@
-"""Switch rooms adapter against a fake Gateway (DDD §7.2): create with the plan, reconcile an
+"""Switch rooms adapter against a fake Gateway (design v5 §5): create with the goals, reconcile an
 existing room, read members back, translate ids through the directory, leak nothing."""
 
 from __future__ import annotations
 
+import tempfile
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 from validation.harness import (
-    CODER_AGENT,
-    GITHUB_EXEC,
+    BASIS,
+    BOOKKEEPER_AGENT,
+    DATA,
     ISAAC,
+    JOHN,
+    LEDGER_EXEC,
     LEONARDO,
-    REVIEWER_AGENT,
+    PLANNER_AGENT,
     SWITCH_EXEC,
-    spec_proposal,
+    goals_proposal,
 )
 
 from sindarin.adapters.base import AdapterError
 from sindarin.adapters.switch_rooms import SwitchRoomsAdapter
-from sindarin.executor.core import spec_instructions
+from sindarin.executor.core import plan_instructions
+from sindarin.ledger import Ledger
 from sindarin.schema import Artifact, Kind, State, make_snapshot
 
+BOOKS = Ledger(Path(tempfile.mkdtemp()) / "books.db")
+BOOKS.import_dir(DATA / BASIS)
+
 PLAN = {
-    "slug": "feat-csv-export",
-    "humans": [ISAAC, LEONARDO],
-    "agents": [CODER_AGENT, REVIEWER_AGENT, GITHUB_EXEC, SWITCH_EXEC],
+    "slug": "plan-2026-11",
+    "humans": [JOHN, LEONARDO],
+    "agents": [PLANNER_AGENT, BOOKKEEPER_AGENT, LEDGER_EXEC, SWITCH_EXEC],
     "instructions_sha": "x",
 }
 DIRECTORY = {
     ISAAC: "isaac",
     LEONARDO: "leonardo",
-    CODER_AGENT: "g-coder",
-    REVIEWER_AGENT: "g-reviewer",
-    GITHUB_EXEC: "g-github",
+    JOHN: "john",
+    PLANNER_AGENT: "g-planner",
+    BOOKKEEPER_AGENT: "g-bookkeeper",
+    LEDGER_EXEC: "g-ledger",
     SWITCH_EXEC: "g-switch",
 }
+
+
+@pytest.fixture(autouse=True)
+def _no_settle(monkeypatch):
+    monkeypatch.setattr("sindarin.adapters.switch_rooms.SETTLE_SECONDS", 0.0)
 
 
 class FakeGateway:
@@ -44,9 +59,9 @@ class FakeGateway:
         self.fail = False
         # gateway agent id → allowed room ids (None = open policy)
         self.policies: dict[str, list[str] | None] = {
-            "g-coder": ["!room-old:test"],
-            "g-reviewer": ["!room-old:test"],
-            "g-github": ["!room-releases:test"],
+            "g-planner": ["!room-old:test"],
+            "g-bookkeeper": ["!room-old:test"],
+            "g-ledger": ["!room-planning:test"],
             "g-switch": None,
         }
 
@@ -91,19 +106,19 @@ class FakeGateway:
 
 
 def _artifact() -> Artifact:
-    p = spec_proposal()
-    snap = make_snapshot("SPEC-1", "@p:t", p, PLAN)
+    p = goals_proposal(BOOKS)
+    snap = make_snapshot("GOALS-1", "@p:t", p, PLAN)
     now = datetime(2026, 11, 5, tzinfo=UTC)
     return Artifact(
-        id="SPEC-1",
-        kind=Kind.SPEC,
+        id="GOALS-1",
+        kind=Kind.GOALS,
         state=State.OPENING,
-        rule="spec",
+        rule="goals",
         room_id="!p",
         thread_id="t",
         proposal_message_id="m",
         proposer_id="@p:t",
-        proposer_name="product",
+        proposer_name="planner",
         proposal_json=p.model_dump_json(by_alias=True),
         snapshot_json=snap.canonical(),
         snapshot_sha=snap.hash,
@@ -119,18 +134,18 @@ def test_create_verify_and_reconcile():
     assert adapter.verify(a).present is False
     r = adapter.execute(a)
     assert r.ok and {k: r.data[k] for k in ("room_id", "room_name", "members")} == {
-        "room_id": "!room-feat-csv-export:test",
-        "room_name": "feat-csv-export",
+        "room_id": "!room-plan-2026-11:test",
+        "room_name": "plan-2026-11",
         "members": 6,
     }
     room = gw.rooms[0]
     assert room["channel_type"] == "channel_private" and room["bridge_id"] == "bridge-1"
-    assert room["agent_ids"] == ["g-coder", "g-reviewer", "g-github", "g-switch"] and room[
+    assert room["agent_ids"] == ["g-planner", "g-bookkeeper", "g-ledger", "g-switch"] and room[
         "user_names"
-    ] == ["isaac", "leonardo"]
+    ] == ["john", "leonardo"]
     assert (
-        room["instructions"] == spec_instructions(a.proposal())
-        and "GET /orders.csv" in room["instructions"]
+        room["instructions"] == plan_instructions(a.proposal())
+        and "## Goals for 2026-11" in room["instructions"]
     )
     assert adapter.verify(a).present is True
     # the room exists but lost a member: execute reconciles instead of creating twice
@@ -162,8 +177,8 @@ def test_opening_a_room_widens_scoped_addressing_only():
     r = adapter.execute(_artifact())
     assert r.data["addressing_widened"] == 3
     new_room = r.data["room_id"]
-    assert gw.policies["g-coder"] == ["!room-old:test", new_room]
-    assert gw.policies["g-github"] == ["!room-releases:test", new_room]
+    assert gw.policies["g-bookkeeper"] == ["!room-old:test", new_room]
+    assert gw.policies["g-ledger"] == ["!room-planning:test", new_room]
     assert gw.policies["g-switch"] is None, "an open policy stays open"
     # a second execute (reconcile) adds nothing twice
     assert adapter.execute(_artifact()).data["addressing_widened"] == 0
@@ -172,3 +187,46 @@ def test_opening_a_room_widens_scoped_addressing_only():
     off = SwitchRoomsAdapter(gw2, bridge_id="b", directory=DIRECTORY, scoped_addressing=False)
     assert off.execute(_artifact()).data["addressing_widened"] == 0
     assert "policy_set" not in gw2.calls
+
+
+def test_a_room_of_the_same_name_on_another_bridge_is_not_reused():
+    """Two Mattermost servers connected: yesterday's #plan-2026-11 on the bundled bridge must
+    not be mistaken for the plan room of the bridge this executor runs on (seen 2026-11-06)."""
+    gw = FakeGateway()
+    gw.rooms.append(
+        {
+            "id": "!room-stale:test",
+            "name": "plan-2026-11",
+            "bridge_id": "old-bridge",
+            "agents": ["g-bookkeeper"],
+            "users": ["leonardo"],
+        }
+    )
+    adapter = SwitchRoomsAdapter(gw, bridge_id="b", directory=DIRECTORY)
+    a = _artifact()
+    assert adapter.verify(a).present is False
+    adapter.execute(a)
+    assert gw.calls.count("create") == 1
+    ours = [r for r in gw.rooms if r.get("bridge_id") == "b" and r["name"] == "plan-2026-11"]
+    assert len(ours) == 1 and adapter.verify(a).present is True
+    # a second execute reconciles our room, still never the stale one
+    adapter.execute(a)
+    assert gw.calls.count("create") == 1
+    # without a bridge of its own the adapter keeps the old by-name behaviour
+    assert SwitchRoomsAdapter(gw, bridge_id="", directory=DIRECTORY)._find("plan-2026-11")
+
+
+def test_settle_waits_for_members_then_a_grace_period(monkeypatch):
+    """The brief must not go out before the bridge has every member (2026-11-06)."""
+    import sindarin.adapters.switch_rooms as mod
+
+    slept: list[float] = []
+    monkeypatch.setattr(mod.time, "sleep", lambda s: slept.append(s))
+    gw = FakeGateway()
+    adapter = SwitchRoomsAdapter(gw, bridge_id="b", directory=DIRECTORY, settle_seconds=2.0)
+    adapter.execute(_artifact())
+    assert slept == [2.0]  # members were complete at once: only the grace period
+    assert "members" in gw.calls
+    # reconciling an existing room does not wait
+    adapter.execute(_artifact())
+    assert slept == [2.0]

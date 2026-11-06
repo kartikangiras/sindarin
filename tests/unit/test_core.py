@@ -1,5 +1,6 @@
-"""Core pipeline coverage beyond the seven adversarial tests (DDD §7): P1–P5 rejections,
-re-proposals, deny and changes, reviews, commands, retries, crash recovery, spec stages, board."""
+"""Core pipeline coverage beyond the seven adversarial tests (design v5 §5, §6): P1–P5
+rejections, re-proposals, deny and changes, commands, the order of the gates, the stage lines,
+retries, crash recovery, the board."""
 
 from __future__ import annotations
 
@@ -7,31 +8,29 @@ import json
 
 import pytest
 from validation.harness import (
-    CODER_AGENT,
-    CUSTOMER,
-    FEATURE,
-    GITHUB_EXEC,
+    ASK,
+    BOOKKEEPER_AGENT,
+    FINANCE,
     ISAAC,
     JOHN,
+    LEDGER_EXEC,
     LEONARDO,
-    PRODUCT,
-    PRODUCT_AGENT,
-    RELEASE_AGENT,
-    RELEASES,
-    REVIEWER_AGENT,
+    PERIOD,
+    PERIOD_ROOM,
+    PLANNER_AGENT,
+    PLANNING,
     SWITCH_EXEC,
     VINCENT,
     Harness,
-    pr_proposal,
+    budget_proposal,
+    goals_proposal,
     proposal_text,
-    release_proposal,
-    review_fence,
-    spec_proposal,
 )
 
-from sindarin.adapters.base import ActionResult, VerifyResult
+from sindarin.adapters.base import VerifyResult
 from sindarin.executor import core
-from sindarin.names import GITHUB_EXECUTOR, SWITCH_EXECUTOR
+from sindarin.ledger import LedgerError
+from sindarin.names import SWITCH_EXECUTOR
 from sindarin.schema import State, is_status_fence
 
 
@@ -53,557 +52,306 @@ def _text(fx) -> str:
         ("@sindarin-switch proposal\n```sindarin-proposal\n{} unterminated", "found 0"),
         ("x\n```sindarin-proposal\n{}\n```\n```sindarin-proposal\n{}\n```", "found 2"),
         (
-            '@sindarin-switch proposal\n```sindarin-proposal\n{"schema":"sindarin/proposal/v2","kind":"spec"}\n```',
+            "@sindarin-switch proposal\n```sindarin-proposal\n"
+            '{"schema":"sindarin/proposal/v3","kind":"goals"}\n```',
             "platform",
         ),
     ],
 )
 def test_p1_malformed(harness: Harness, raw, fragment):
-    fx = harness.say(PRODUCT, PRODUCT_AGENT, raw, mid="m1")
+    fx = harness.say(FINANCE, PLANNER_AGENT, raw, mid="m-bad")
     assert _text(fx).startswith("Proposal not recorded — malformed:") and fragment in _text(fx)
-    assert harness.audit_events(SWITCH_EXECUTOR) == ["rejected_proposal:malformed"]
     assert harness.switch.store.all() == []
 
 
 def test_p1_extra_key_and_wrong_executor(harness: Harness):
-    body = json.loads(spec_proposal().canonical())
-    body["approved"] = True
-    raw = f"@sindarin-switch proposal\n```sindarin-proposal\n{json.dumps(body)}\n```"
-    fx = harness.say(PRODUCT, PRODUCT_AGENT, raw, mid="m1")
-    assert "approved" in _text(fx)
-    # a spec fence sent to sindarin-github (in a room it listens to) is refused, not recorded
-    fx = harness.say(RELEASES, PRODUCT_AGENT, proposal_text(spec_proposal()), mid="m2")
-    assert _text(fx) == "Proposal not recorded — spec proposals go to @sindarin-switch, not me."
-    assert harness.github.store.all() == []
-
-
-def test_p2_wrong_proposer(harness: Harness):
-    fx = harness.say(PRODUCT, CODER_AGENT, proposal_text(spec_proposal()), mid="m1")
-    assert _text(fx) == "Proposal not recorded — only product may propose under rule spec."
-    fx = harness.say(PRODUCT, LEONARDO, proposal_text(spec_proposal()), mid="m2")
-    assert _text(fx) == "Proposal not recorded — only product may propose under rule spec."
+    data = json.loads(goals_proposal(harness.books).canonical())
+    data["extra"] = 1
+    fence = "@sindarin-switch proposal\n```sindarin-proposal\n" + json.dumps(data) + "\n```"
+    fx = harness.say(FINANCE, PLANNER_AGENT, fence, mid="m-x")
+    assert _text(fx).startswith("Proposal not recorded — malformed:")
     fx = harness.say(
-        PRODUCT, PRODUCT_AGENT, proposal_text(spec_proposal()), mid="m3", name="Sindarin Switch"
+        FINANCE, PLANNER_AGENT, proposal_text(budget_proposal(harness.books)), mid="m-y"
     )
-    assert harness.spec("SPEC-1") is not None, "display names never matter"
-    assert harness.audit_events(SWITCH_EXECUTOR)[:2] == ["rejected_proposal:bad_sender"] * 2
+    assert _text(fx) == "Proposal not recorded — budget proposals go to @sindarin-ledger, not me."
 
 
-def test_p2_wrong_room(harness: Harness):
-    harness.run_spec_gate()
-    harness.open_pull(41)
-    # a merge proposal in #releases (sindarin-github listens there) is the wrong room
-    fx = harness.propose_pr("m-pr-x", room=RELEASES)
-    assert _text(fx) == "Proposal not recorded — I take pr proposals in the feature room only."
-    # a release proposal in a feature room
-    fx = harness.propose_release("m-rel-x", room=FEATURE)
-    assert _text(fx) == "Proposal not recorded — I take release proposals in #releases only."
-    assert harness.github.store.all() == []
+def test_p2_wrong_proposer_and_room(harness: Harness):
+    text = proposal_text(goals_proposal(harness.books))
+    fx = harness.say(FINANCE, BOOKKEEPER_AGENT, text, mid="m-a")
+    assert _text(fx) == "Proposal not recorded — only planner may propose under rule goals."
+    fx = harness.say(PLANNING, PLANNER_AGENT, text, mid="m-b", to=(SWITCH_EXECUTOR,))
+    assert _text(fx) == "Proposal not recorded — I take goals proposals in #acme-finance only."
 
 
-def test_p3_policy(harness: Harness):
-    fx = harness.propose_spec("m1", repo="acme/other")
-    assert _text(fx).startswith(
-        "Proposal not recorded — policy: repository 'acme/other' is not allowed"
-    )
-    fx = harness.propose_spec("m2", engineer=VINCENT)
-    assert _text(fx) == "Proposal not recorded — policy: engineer is not in group engineering."
-    harness.run_spec_gate()
-    harness.open_pull(41)
-    fx = harness.propose_pr("m3", repo="acme/other")
-    assert "not allowed by rule merge" in _text(fx)
-    fx = harness.propose_release("m4", tag="v9")
-    assert "does not match rule release pattern" in _text(fx)
-    assert harness.gh.count("execute") == 0 and harness.github.store.all() == []
+def test_p4_facts_from_the_ledger(harness: Harness):
+    h = harness
+    h.run_goals_gate()
+    p = budget_proposal(h.books)
+    h.books.add_sale("S-2026-1055", "2026-10-30", "Contoso Ltd", 398000)
+    fx = h.say(PLANNING, PLANNER_AGENT, proposal_text(p), mid="m-hint")
+    assert "the ledger changed since this was prepared" in _text(fx) and h.budget() is None
+    fx = h.propose_budget(mid="m-fresh")
+    assert _text(fx).startswith("**BUDGET-1** pending · 4 lines · 16,000.00 USD under the cap")
 
 
-def test_p4_facts_from_the_platform(harness: Harness):
-    harness.run_spec_gate()
-    fx = harness.propose_pr("m1", number=99)  # never opened
-    assert (
-        _text(fx)
-        == "Proposal not recorded — could not read acme/sindarin-demo-app#99 from github: pull request #99 not found."
-    )
-    pr = harness.open_pull(41, draft=True)
-    fx = harness.propose_pr("m2")
-    assert _text(fx) == "Proposal not recorded — pull request is a draft."
-    pr.draft, pr.base = False, "develop"
-    fx = harness.propose_pr("m3")
-    assert "merges into main" in _text(fx)
-    pr.base = "main"
-    # a stale hint: the fence names an old head
-    fx = harness.propose_pr("m4", head_sha="0" * 40)
-    assert _text(fx).startswith("Proposal not recorded — head is `")
-    assert "re-propose at the current head" in _text(fx)
-    fx = harness.propose_pr("m5")
-    assert harness.pr().state is State.PENDING
-    assert harness.pr().facts()["head_sha"] == pr.head_sha
-    # releases: tag exists / commit missing
-    harness.gh.tags["v1.4.0"] = "a" * 40
-    fx = harness.propose_release("m6")
-    assert _text(fx) == "Proposal not recorded — tag v1.4.0 already exists."
-    fx = harness.propose_release("m7", tag="v1.5.0", target_sha="f" * 40)
-    assert _text(fx) == "Proposal not recorded — target sha is not a commit in the repository."
-
-
-def test_p5_duplicate_and_reproposal_keep_id(harness: Harness):
-    harness.propose_spec("m-spec-1")
-    fx = harness.say(
-        PRODUCT, PRODUCT_AGENT, proposal_text(spec_proposal()), mid="m-spec-dup", thread="m-spec-1"
-    )
-    assert _text(fx) == "Proposal not recorded — SPEC-1 is already pending with this snapshot."
-    # changes → changes_requested; the re-proposal in the thread keeps SPEC-1, new snapshot
-    fx = harness.command(
-        "m-ch",
-        "changes SPEC-1 tighten criterion 2",
-        sender=LEONARDO,
-        room=PRODUCT,
-        executor=SWITCH_EXECUTOR,
-        thread="m-spec-1",
-    )
-    assert _text(fx).startswith(
-        "**SPEC-1** sent back by Leonardo: tighten criterion 2 @product revise"
-    )
-    a = harness.spec()
-    assert (
-        a.state is State.CHANGES_REQUESTED
-        and a.note == "tighten criterion 2"
-        and a.approver_name == "Leonardo"
-    )
-    old = a.snapshot_sha
-    fx = harness.say(
-        PRODUCT,
-        PRODUCT_AGENT,
-        proposal_text(spec_proposal(criteria=["a", "b", "c", "tighter d"])),
-        mid="m-spec-2",
-        thread="m-spec-1",
-    )
-    a = harness.spec()
-    assert (
-        a.state is State.PENDING and a.snapshot_sha != old and a.seq == 4 and a.approver_id is None
-    )
-    assert a.proposal_message_id == "m-spec-2" and a.proposal().body.criteria[-1] == "tighter d"
-    assert _text(fx).startswith("**SPEC-1** pending (revised, approvals cleared) ·")
-    assert harness.switch.store.peek_next_id(core.Kind.SPEC) == "SPEC-2"
-    assert harness.audit_events(SWITCH_EXECUTOR)[-1] == "reproposed"
-    # a *different* spec in another thread gets the next id
-    harness.propose_spec("m-spec-3", slug="feat-xlsx")
-    assert harness.spec("SPEC-2").target == "feat-xlsx"
-
-
-def test_pr_reproposal_updates_snapshot_in_place(harness: Harness):
-    harness.run_spec_gate()
-    harness.open_pull(41)
-    harness.propose_pr()
-    harness.gh.push(41)
-    fx = harness.propose_pr("m-pr-2")
-    assert _text(fx).startswith("**PR-41** pending (revised, approvals cleared) ·")
-    assert harness.pr().facts()["head_sha"] == harness.gh.pulls[41].head_sha
-    harness.approve_pr()
-    fx = harness.propose_pr("m-pr-3")
-    assert _text(fx) == "Proposal not recorded — pull request is closed, not open."
-    # and a merged artifact proposed again while GitHub still says open is refused by state
-    harness.gh.pulls[41].state, harness.gh.pulls[41].merged = "open", False
-    fx = harness.propose_pr("m-pr-4")
-    assert _text(fx) == "Proposal not recorded — PR-41 is merged, not open for proposals."
+def test_p5_reproposal_keeps_id_and_duplicates_are_refused(harness: Harness):
+    h = harness
+    h.propose_goals()
+    fx = h.propose_goals(mid="m-goals-dup")
+    assert "GOALS-1 is already pending with this snapshot" in _text(fx)
+    fx = h.propose_goals(mid="m-goals-other", ask="m-ask-2")
+    assert "**GOALS-1** is already pending for 2026-11" in _text(fx)
+    fx = h.propose_goals(mid="m-goals-rev", summary="Revised: a lower cap.")
+    assert _text(fx).startswith("**GOALS-1** pending (revised, approvals cleared)")
+    assert h.goals().seq == 2 and h.switch.store.peek_next_id(h.goals().kind) == "GOALS-2"
 
 
 def test_unaddressed_own_and_idless_messages_only_recorded(harness: Harness):
     fx = harness.say(
-        PRODUCT, LEONARDO, "@sindarin-switch approve SPEC-1", mid="m1", addressed=False
+        PLANNING, ISAAC, "@sindarin-ledger approve BUDGET-1", mid="m-u", addressed=False
     )
-    assert [type(e).__name__ for e in fx] == ["RecordMessage"]
-    fx = harness.say(PRODUCT, SWITCH_EXEC, "@sindarin-switch approve SPEC-1", mid="m2")
-    assert [type(e).__name__ for e in fx] == ["RecordMessage"]
-    fx = harness.say(PRODUCT, "", "@sindarin-switch approve SPEC-1", mid="m3", name="")
-    assert [type(e).__name__ for e in fx] == ["RecordMessage"]
-    assert harness.posts == []
-
-
-# -- reviews ------------------------------------------------------------------------------------
-
-
-def test_review_paths(harness: Harness):
-    harness.run_spec_gate()
-    harness.open_pull(41)
-    harness.propose_pr()
-    head = harness.gh.pulls[41].head_sha
-    fx = harness.say(FEATURE, CODER_AGENT, review_fence(head_sha=head), mid="r1", thread="m-pr-1")
-    assert _text(fx) == "Review not recorded — only reviewer posts reviews."
+    assert _posts(fx) == [] and harness.ledger.store.get_message("m-u") is not None
     fx = harness.say(
-        FEATURE, REVIEWER_AGENT, review_fence(pr="PR-99", head_sha=head), mid="r2", thread="m-pr-1"
+        PLANNING, LEDGER_EXEC, "**BUDGET-1** pending", mid="m-own", name="sindarin-ledger"
     )
-    assert _text(fx) == "Review not recorded — PR-99 is unknown here."
-    fx = harness.say(
-        FEATURE, REVIEWER_AGENT, "@sindarin-github review\n```sindarin-review\n{}\n```", mid="r3"
-    )
-    assert _text(fx).startswith("Review not recorded — malformed:")
-    fx = harness.review("r4", met=[True, False, True, False])
-    assert (
-        _text(fx) == f"**PR-41** last review: **2 of 4** criteria met at `{head[:7]}` by reviewer."
-    )
-    assert _posts(fx)[0].thread_id == "m-pr-1"
-    # a review of an older head is kept and flagged
-    harness.gh.push(41)
-    harness.propose_pr("m-pr-2")
-    fx = harness.say(
-        FEATURE, REVIEWER_AGENT, review_fence(head_sha=head), mid="r5", thread="m-pr-1"
-    )
-    assert "The pending head is `" in _text(fx)
-    # the pending template shows the last review
-    harness.review("r6")
-    fx = harness.command("st", "status PR-41", sender=ISAAC, room=FEATURE)
-    assert "last review: **4 of 4**" in _text(fx)
-    # a review posted to the wrong executor
-    fx = harness.say(
-        PRODUCT, REVIEWER_AGENT, review_fence(head_sha=head), mid="r7", to=(SWITCH_EXECUTOR,)
-    )
-    assert _text(fx) == "Review not recorded — reviews go to @sindarin-github."
+    assert _posts(fx) == []
 
 
-# -- commands -----------------------------------------------------------------------------------
+# -- commands -------------------------------------------------------------------------------------
 
 
 def test_help_whoami_bare_mention_and_silence(harness: Harness):
-    fx = harness.command("c1", "help", sender=VINCENT, room=RELEASES)
-    assert _text(fx).startswith("Commands: `approve <id>`")
-    fx = harness.command("c2", "whoami", sender=ISAAC, room=FEATURE)
-    assert _text(fx) == f"Isaac: participant id `{ISAAC}` · groups: engineering"
-    fx = harness.command("c3", "whoami", sender=CODER_AGENT, room=FEATURE)
-    assert _text(fx) == f"coder: participant id `{CODER_AGENT}` · agent role coder"
-    fx = harness.say(RELEASES, JOHN, "@sindarin-github", mid="c4")
+    fx = harness.command("c1", "help", sender=VINCENT, room=PLANNING)
+    assert _text(fx).startswith("Commands: `approve <id>`") and "`brief`" in _text(fx)
+    fx = harness.command("c2", "whoami", sender=LEONARDO, room=PLANNING)
+    assert _text(fx) == f"Leonardo: participant id `{LEONARDO}` · groups: controllers"
+    fx = harness.command("c3", "whoami", sender=PLANNER_AGENT, room=PLANNING)
+    assert _text(fx) == f"planner: participant id `{PLANNER_AGENT}` · agent role planner"
+    fx = harness.say(PLANNING, JOHN, "@sindarin-ledger", mid="c4")
     assert _text(fx).startswith("Commands:")
-    fx = harness.say(RELEASES, JOHN, "@sindarin-github please approve REL-1 now", mid="c5")
-    assert _posts(fx) == [] and harness.audit_events(GITHUB_EXECUTOR)[-1] == "ignored"
+    fx = harness.say(PLANNING, JOHN, "@sindarin-ledger please approve BUDGET-1 now", mid="c5")
+    assert _posts(fx) == [] and harness.audit_events()[-1] == "ignored"
+    fx = harness.command("c6", "approve BUDGET-1.", sender=JOHN, room=PLANNING)
+    assert "**BUDGET-1** is unknown here" in _text(fx)  # the period is tolerated, the id checked
 
 
-def test_status_and_unknown_ids(harness: Harness):
-    fx = harness.command("s0", "status", sender=ISAAC, room=FEATURE)
-    assert _text(fx) == "No open artifacts in this room."
-    harness.run_spec_gate()
-    harness.open_pull(41)
-    harness.propose_pr()
-    fx = harness.command("s1", "status", sender=ISAAC, room=FEATURE)
-    assert _text(fx).startswith(
-        "**PR-41** · pending · #41 CSV export of orders"
-    ) and "awaiting approval until" in _text(fx)
-    fx = harness.command("s2", "status PR-41", sender=VINCENT, room=FEATURE)
-    assert "snapshot sha256" in _text(fx) and "revision 1" in _text(fx)
-    fx = harness.command("s3", "status SPEC-1", sender=ISAAC, room=FEATURE)
-    assert _text(fx) == "**SPEC-1** is unknown here."
-    fx = harness.command("s4", "approve SPEC-1", sender=LEONARDO, room=FEATURE)
-    assert _text(fx) == "**SPEC-1** is unknown here. Try @sindarin-switch."
-    fx = harness.command("s5", "approve PR-7", sender=ISAAC, room=FEATURE)
-    assert _text(fx) == "**PR-7** is unknown here."
-
-
-def test_deny_paths(harness: Harness):
-    harness.propose_spec()
-    fx = harness.command(
-        "d1", "deny SPEC-1", sender=VINCENT, room=PRODUCT, executor=SWITCH_EXECUTOR
+def test_status_board_pointer_and_board(harness: Harness):
+    h = harness
+    h.run_goals_gate()
+    assert _text(h.command("s1", "status", sender=JOHN, room=PLANNING)) == (
+        "No open artifacts in this room."
     )
-    assert _text(fx) == "**SPEC-1** not applied — Vincent is not in the pm group."
-    fx = harness.command(
-        "d2", "deny SPEC-1", sender=PRODUCT_AGENT, room=PRODUCT, executor=SWITCH_EXECUTOR
+    assert "unknown here" in _text(h.command("s2", "status GOALS-1", sender=JOHN, room=PLANNING))
+    fx = h.command("s3", "status GOALS-1", sender=JOHN, room=FINANCE, executor=SWITCH_EXECUTOR)
+    assert _text(fx).startswith("**GOALS-1** · open · Plan November 2026")
+    assert _text(h.command("s4", "board", sender=JOHN, room=PLANNING)) == (
+        "The board is kept by @sindarin-switch in #acme-finance."
     )
-    assert _text(fx) == "**SPEC-1** not applied — @product is an agent, not an approver."
-    fx = harness.command(
-        "d3",
-        "deny SPEC-1 not this quarter",
-        sender=LEONARDO,
-        room=PRODUCT,
+    h.propose_budget()
+    fx = h.command("s5", "board", sender=JOHN, room=FINANCE, executor=SWITCH_EXECUTOR)
+    text = _text(fx)
+    assert text.startswith("**Board**") and "GOALS-1 · open · John" in text
+    assert "waiting on planner and bookkeeper" in text
+    assert "BUDGET-1 · #planning · board: Isaac" in text
+    fx = h.command("s6", "status", sender=JOHN, room=PLANNING)
+    assert _text(fx).startswith("**BUDGET-1** · pending · 4 lines · 16,000.00 USD under the cap")
+
+
+def test_deny_and_changes(harness: Harness):
+    h = harness
+    h.propose_goals()
+    fx = h.command(
+        "d1",
+        "changes GOALS-1 lower the cap",
+        sender=JOHN,
+        room=FINANCE,
         executor=SWITCH_EXECUTOR,
+        thread=ASK,
     )
-    assert _text(fx) == "**SPEC-1** denied by Leonardo: not this quarter. @product nothing happens."
-    a = harness.spec()
-    assert a.state is State.DENIED and a.note == "not this quarter"
-    fx = harness.command(
-        "d4", "approve SPEC-1", sender=LEONARDO, room=PRODUCT, executor=SWITCH_EXECUTOR
+    assert _text(fx).startswith("**GOALS-1** sent back by John: lower the cap @planner")
+    assert h.goals().state is State.CHANGES_REQUESTED
+    assert _text(h.approve_goals("d2")) == "**GOALS-1** is changes_requested, not pending."
+    h.propose_goals(mid="m-goals-2", summary="With a lower cap.")
+    assert h.goals().state is State.PENDING and h.goals().seq >= 2
+    fx = h.command(
+        "d3",
+        "deny GOALS-1 not this month",
+        sender=JOHN,
+        room=FINANCE,
+        executor=SWITCH_EXECUTOR,
+        thread=ASK,
     )
-    assert _text(fx) == "**SPEC-1** is denied, not pending."
-    fx = harness.command(
-        "d5", "changes SPEC-1 again", sender=LEONARDO, room=PRODUCT, executor=SWITCH_EXECUTOR
-    )
-    assert _text(fx) == "**SPEC-1** is denied, not pending."
-    assert harness.rooms.count("execute") == 0
+    assert _text(fx) == "**GOALS-1** denied by John: not this month. @planner nothing happens."
+    assert h.goals().state is State.DENIED and h.rooms.count("execute") == 0
+    fx = h.command("d4", "deny GOALS-1", sender=VINCENT, room=FINANCE, executor=SWITCH_EXECUTOR)
+    assert "Vincent is not in the cfo group" in _text(fx)
 
 
 def test_peer_executor_is_refused_as_approver(harness: Harness):
-    harness.propose_spec()
-    fx = harness.command(
-        "x1", "approve SPEC-1", sender=GITHUB_EXEC, room=PRODUCT, executor=SWITCH_EXECUTOR
+    h = harness
+    h.run_goals_gate()
+    h.propose_budget()
+    fx = h.say(
+        PLANNING,
+        SWITCH_EXEC,
+        "@sindarin-ledger approve BUDGET-1",
+        mid="peer",
+        name="sindarin-switch",
+        thread="m-budget-1",
     )
-    assert _text(fx) == "**SPEC-1** not applied — @sindarin-github is an agent, not an approver."
+    assert _text(fx) == "**BUDGET-1** not applied — @sindarin-switch is an agent, not an approver."
 
 
-def test_changes_requested_cannot_be_approved_until_reproposed(harness: Harness):
-    harness.propose_spec()
-    harness.command(
-        "c1",
-        "changes SPEC-1 add a limit",
-        sender=LEONARDO,
-        room=PRODUCT,
-        executor=SWITCH_EXECUTOR,
-        thread="m-spec-1",
-    )
-    fx = harness.approve_spec("c2")
-    assert _text(fx) == "**SPEC-1** is changes_requested, not pending."
-    fx = harness.command(
-        "c3", "changes SPEC-1 and more", sender=LEONARDO, room=PRODUCT, executor=SWITCH_EXECUTOR
-    )
-    assert _text(fx) == "**SPEC-1** is changes_requested, not pending."
-    fx = harness.command(
-        "c4", "deny SPEC-1 never mind", sender=LEONARDO, room=PRODUCT, executor=SWITCH_EXECUTOR
-    )
-    assert harness.spec().state is State.DENIED
+# -- the gates in order --------------------------------------------------------------------------
 
 
-# -- execution, retries, recovery --------------------------------------------------------------
-
-
-def test_spec_gate_opens_room_with_plan_and_posts_brief(harness: Harness):
-    harness.propose_spec()
-    plan = harness.spec().facts()
-    assert plan["humans"] == [ISAAC, LEONARDO]
-    assert plan["agents"] == [CODER_AGENT, REVIEWER_AGENT, GITHUB_EXEC, SWITCH_EXEC]
-    fx = harness.approve_spec()
-    kinds = [type(e).__name__ for e in fx]
-    assert kinds.index("Transition") < kinds.index("Execute")
-    assert [e.state.value for e in fx if isinstance(e, core.Transition)] == [
-        "approved",
-        "opening",
-        "open",
-    ]
+def test_goals_gate_opens_the_plan_room_with_the_goals(harness: Harness):
+    h = harness
+    h.propose_goals()
+    plan = h.goals().facts()
+    assert plan["humans"] == [JOHN, LEONARDO]  # the cfo, then the controllers the rule invites
+    assert plan["agents"] == [PLANNER_AGENT, BOOKKEEPER_AGENT, LEDGER_EXEC, SWITCH_EXEC]
+    fx = h.approve_goals()
     texts = [p.text for p in _posts(fx)]
     assert texts[0].startswith(
-        "**SPEC-1** approved by Leonardo · room **#feat-csv-export** opened · verified at **"
+        "**GOALS-1** approved by John · room **#plan-2026-11** opened · verified at **"
     )
     assert texts[1].startswith(
-        "**SPEC-1** feature room **#feat-csv-export** is open · people: Isaac, Leonardo · agents: coder, reviewer, sindarin-github, sindarin-switch"
+        "**GOALS-1** plan room **#plan-2026-11** is open · people: John, Leonardo · "
+        "agents: planner, bookkeeper, sindarin-ledger, sindarin-switch"
     )
-    room = harness.rooms.rooms["feat-csv-export"]
-    assert room["humans"] == [ISAAC, LEONARDO] and set(room["agents"]) == set(plan["agents"])
-    assert harness.spec().result()["room_id"] == FEATURE
-
-
-def test_spec_plan_change_is_caught_at_approval(harness: Harness, temp_policy):
-    harness.propose_spec()
-    temp_policy(lambda d: d["groups"]["pm"].append(VINCENT))
-    fx = harness.approve_spec()
-    texts = [p.text for p in _posts(fx)]
-    assert texts[0].startswith("**SPEC-1** changed since it was proposed (humans ")
-    assert harness.spec().state is State.PENDING and harness.rooms.count("execute") == 0
-    harness.approve_spec("m-ok-2")
-    assert harness.spec().state is State.OPEN
-
-
-def test_merge_failure_retries_once_then_fails(harness: Harness):
-    harness.run_spec_gate()
-    harness.open_pull(41)
-    harness.propose_pr()
-    harness.gh.fail_execute_times = 1
-    fx = harness.approve_pr()
-    assert [e.state.value for e in fx if isinstance(e, core.Transition)] == [
-        "approved",
-        "executing",
-        "merge_failed",
-    ]
-    a = harness.pr()
-    assert (
-        a.state is State.MERGE_FAILED and a.attempts == 1 and a.error == "GitHub 502: bad gateway"
+    assert "The budget is approved in #planning by cfo (the board above the limit)" in texts[1]
+    brief = next(p for p in _posts(fx) if p.room_id == PERIOD_ROOM)
+    assert brief.text.startswith(
+        "@planner @bookkeeper **GOALS-1** instructions · approved by John · period 2026-11."
+    )
+    assert "## Goals for 2026-11" in brief.text and "Cost cap 16,000.00 USD" in brief.text
+    assert h.rooms.rooms["plan-2026-11"]["humans"] == [JOHN, LEONARDO]
+    assert h.goals().result()["room_id"] == PERIOD_ROOM
+    fx = h.say(
+        PERIOD_ROOM, BOOKKEEPER_AGENT, "@sindarin-switch brief", mid="b1", to=(SWITCH_EXECUTOR,)
     )
     assert (
-        _posts(fx)[-1].text
-        == "**PR-41** approved by Isaac but merge pr failed: GitHub 502: bad gateway. Retrying once in 60 min."
+        _text(fx).startswith("@bookkeeper **GOALS-1** instructions")
+        and _posts(fx)[0].thread_id is None
     )
-    harness.clock.advance(minutes=30)
-    assert [e for e in harness.sweep() if isinstance(e, core.Execute)] == []
-    harness.clock.advance(minutes=31)
-    fx = harness.sweep()
-    assert harness.pr().state is State.MERGED and harness.pr().attempts == 2
-    assert "retry" in harness.audit_events()
-    # a second failure is final
-    harness.open_pull(42)
-    harness.propose_pr("m-pr-2", number=42)
-    harness.gh.fail_execute_times = 2
-    harness.approve_pr("ok-2", pr="PR-42")
-    harness.clock.advance(minutes=61)
-    fx = harness.sweep()
-    a = harness.pr("PR-42")
-    assert a.state is State.FAILED and a.attempts == 2
-    assert _posts(fx)[-1].text.startswith("**PR-42** approved by Isaac but merge pr failed again:")
-    assert "a new proposal is required" in _posts(fx)[-1].text
-    assert harness.sweep() == [] or not any(isinstance(e, core.Execute) for e in harness.sweep())
+
+
+def test_order_of_the_gates(harness: Harness):
+    h = harness
+    assert "GOALS-1 are not approved goals yet" in _text(h.propose_entries(mid="m-early"))
+    h.run_goals_gate()
+    fx = h.propose_entries(mid="m-entries-before-budget")
+    assert "no budget is recorded for GOALS-1 yet" in _text(fx)
+    h.propose_budget()
+    fx = h.propose_budget(mid="m-budget-again", thread="other")
+    assert "**BUDGET-1** is already pending for GOALS-1" in _text(fx)
+    h.approve_budget()
+    h.sweep()
+    assert "BUDGET-9 is not the recorded budget of GOALS-1" in _text(
+        h.propose_entries(budget="BUDGET-9")
+    )
+    h.propose_entries(mid="m-entries-ok")
+    assert h.entries().state is State.PENDING
+
+
+def test_stage_lines_hand_the_work_on_once(harness: Harness):
+    h = harness
+    h.propose_goals()
+    h.approve_goals()
+    fx = h.sweep("first sweep")
+    lines = [p for p in _posts(fx) if p.room_id == PLANNING]
+    assert len(lines) == 1 and lines[0].text == (
+        "**GOALS-1** approved · revenue target 95,000.00 USD · cost cap 16,000.00 USD for "
+        "2026-11. @planner propose the budget."
+    )
+    assert [p for p in _posts(h.sweep("second sweep")) if p.room_id == PLANNING] == []
+    h.propose_budget()
+    h.approve_budget()
+    fx = h.sweep("after budget")
+    ready = [p for p in _posts(fx) if p.room_id == PERIOD_ROOM]
+    assert ready and ready[0].text == (
+        "**BUDGET-1** recorded · 4 lines, 16,000.00 USD under the cap · period 2026-11 is "
+        "ready for its entries. @bookkeeper propose the budget register entries."
+    )
+    assert h.books.targets(PERIOD)["cost_cap_cents"] == 1600000  # the goals landed in the ledger
+    h.propose_entries()
+    h.approve_entries()
+    fx = h.sweep("after entries")
+    done = [p for p in _posts(fx) if p.room_id == FINANCE]
+    assert done and done[0].text == (
+        "**GOALS-1** done · ENTRIES-1 applied · period 2026-11 is planned. "
+        "@analyst tell the business."
+    )
+    assert done[0].thread_id == ASK and h.goals().state is State.DONE
+    assert h.books.period_status(PERIOD) == "planned" and len(h.planned()) == 4
+    # the period is planned: a second set of goals for it, in a new thread, is refused
+    fx = h.propose_goals(mid="m-goals-again", ask="m-ask-9")
+    assert "**GOALS-1** is already done for 2026-11" in _text(fx)
+
+
+# -- failures, retries, recovery -------------------------------------------------------------------
+
+
+def test_record_failure_retries_once_then_fails(harness: Harness, monkeypatch):
+    h = harness
+    h.run_goals_gate()
+    h.propose_budget()
+
+    def boom(*args, **kwargs):
+        raise LedgerError("books locked")
+
+    monkeypatch.setattr(h.books, "record_budget", boom)
+    fx = h.approve_budget()
+    assert any(
+        "record budget failed: books locked. Retrying once in 60 min" in p.text for p in _posts(fx)
+    )
+    assert h.budget().state is State.RECORD_FAILED
+    h.clock.advance(hours=1, minutes=1)
+    fx = h.sweep()
+    assert h.budget().state is State.FAILED and any("failed again" in p.text for p in _posts(fx))
+    assert h.recorded() == []
 
 
 def test_room_open_failure_retries_hourly_for_ever(harness: Harness):
-    harness.propose_spec()
-    harness.rooms.fail_execute_times = 3
-    harness.approve_spec()
-    assert harness.spec().state is State.OPEN_FAILED
-    for _ in range(2):
-        harness.clock.advance(minutes=61)
-        harness.sweep()
-        assert harness.spec().state is State.OPEN_FAILED
-    harness.clock.advance(minutes=61)
-    harness.sweep()
-    assert harness.spec().state is State.OPEN and harness.spec().attempts == 4
+    h = harness
+    h.propose_goals()
+    h.rooms.fail_execute_times = 3
+    h.approve_goals()
+    assert h.goals().state is State.OPEN_FAILED
+    for _ in range(3):
+        h.clock.advance(hours=1, minutes=1)
+        h.sweep()
+    assert h.goals().state is State.OPEN and h.goals().attempts == 4
 
 
-def test_read_back_failure_is_not_success(harness: Harness):
-    harness.run_spec_gate()
-    harness.open_pull(41)
-    harness.propose_pr()
-    harness.gh.fail_verify_times = 1
-    harness.approve_pr()
-    a = harness.pr()
-    assert a.state is State.MERGE_FAILED and "read-back failed" in a.error
-    assert harness.gh.pulls[41].merged, "the merge landed; the retry will find it"
-    harness.clock.advance(minutes=61)
-    harness.sweep()
-    assert harness.pr().state is State.MERGED
+def test_read_back_failure_is_not_success(harness: Harness, monkeypatch):
+    h = harness
+    h.run_goals_gate()
+    h.propose_budget()
+    adapter = h.ledger.adapters["ledger"]
+    monkeypatch.setattr(type(adapter), "verify", lambda self, a: VerifyResult(present=False))
+    fx = h.approve_budget()
+    assert h.budget().state is State.RECORD_FAILED
+    assert any("not visible on read-back" in p.text for p in _posts(fx))
 
 
 def test_crash_recovery(harness: Harness):
-    harness.run_spec_gate()
-    harness.open_pull(41)
-    harness.propose_pr()
-    # crash after `approved` was written and before `executing`
-    harness.github.store.transition(
-        "PR-41",
-        State.APPROVED,
-        approver_id=ISAAC,
-        approver_name="Isaac",
-        approved_at=harness.clock.now,
-    )
-    harness.sweep()
-    assert (
-        "recovery_resume" in harness.audit_events() and "recovery_execute" in harness.audit_events()
-    )
-    assert harness.pr().state is State.MERGED
-    # crash after `executing` with the merge already landed: verify alone finishes it
-    harness.open_pull(42)
-    harness.propose_pr("m-pr-2", number=42)
-    harness.github.store.transition(
-        "PR-42",
-        State.APPROVED,
-        approver_id=ISAAC,
-        approver_name="Isaac",
-        approved_at=harness.clock.now,
-    )
-    harness.github.store.transition("PR-42", State.EXECUTING, attempts=1)
-    harness.gh.pulls[42].merged = True
-    harness.gh.pulls[42].merge_commit_sha = "c" * 40
-    harness.sweep()
-    assert harness.pr("PR-42").state is State.MERGED and harness.gh.count("execute") == 1
-    # a verify error leaves it for the next sweep
-    harness.open_pull(43)
-    harness.propose_pr("m-pr-3", number=43)
-    harness.github.store.transition(
-        "PR-43",
-        State.APPROVED,
-        approver_id=ISAAC,
-        approver_name="Isaac",
-        approved_at=harness.clock.now,
-    )
-    harness.github.store.transition("PR-43", State.EXECUTING, attempts=1)
-    harness.gh.fail_verify_times = 1
-    harness.sweep()
-    assert (
-        harness.pr("PR-43").state is State.EXECUTING
-        and harness.audit_events()[-1] == "recovery_verify_error"
-    )
-    harness.sweep()
-    assert harness.pr("PR-43").state is State.MERGED
+    h = harness
+    h.run_goals_gate()
+    h.propose_budget()
+    # the executor died right after writing `approved`: the sweep resumes, verifies, then acts
+    h.ledger.store.transition("BUDGET-1", State.APPROVED, approver_id=ISAAC, approver_name="Isaac")
+    fx = h.sweep("recovery")
+    assert h.budget().state is State.RECORDED and len(h.recorded()) == 4
+    assert any("approved by Isaac · recorded 16,000.00 USD" in p.text for p in _posts(fx))
+    events = h.audit_events()
+    assert "recovery_resume" in events and "recovery_execute" in events
 
 
-def test_after_execute_ignores_stale_state(harness: Harness):
-    harness.propose_spec()
-    ctx = harness.switch.context()
-    fx = core.after_execute(ctx, harness.spec(), ActionResult(ok=True), True)
-    assert [e.event for e in fx if isinstance(e, core.Audit)] == ["execute_result_ignored"]
-    fx = core.after_verify(ctx, harness.spec(), VerifyResult(present=True))
-    assert [e.event for e in fx if isinstance(e, core.Audit)] == ["verify_result_ignored"]
-
-
-def test_post_failure_does_not_stop_state(harness: Harness):
-    harness.propose_spec()
-
-    def boom(room, text, thread):
-        raise RuntimeError("switch down")
-
-    harness.switch.poster = boom
-    harness.approve_spec()
-    assert harness.spec().state is State.OPEN
-
-
-# -- spec stages and the board (sindarin-switch reads sindarin-github's state) -----------------
-
-
-def test_spec_stages_follow_the_peer_state(harness: Harness):
-    harness.run_spec_gate()
-    harness.run_merge_gate()
-    fx = harness.sweep()
-    assert harness.spec().state is State.DONE
-    assert any(p.text == "**SPEC-1** done · PR-41 merged." for p in _posts(fx))
-    harness.propose_release()
-    harness.approve_release()
-    fx = harness.sweep()
-    assert harness.spec().state is State.RELEASED
-    assert any(p.text == "**SPEC-1** released in REL-1." for p in _posts(fx))
-    assert harness.audit_events(SWITCH_EXECUTOR)[-2:] == [
-        "spec_released",
-        "board_posted",
-    ] or "spec_released" in harness.audit_events(SWITCH_EXECUTOR)
-
-
-def test_board(harness: Harness):
-    harness.run_spec_gate()
-    harness.open_pull(41)
-    harness.propose_pr()
-    fx = harness.command("b1", "board", sender=LEONARDO, room=PRODUCT, executor=SWITCH_EXECUTOR)
-    board = _posts(fx)[0]
-    assert board.room_id == PRODUCT and board.thread_id is None
-    lines = board.text.splitlines()
-    assert lines[0].startswith("**Board** · 2026-11-05") and lines[1] == "**In flight**"
-    assert any(
-        ln.startswith("SPEC-1 · open · Leonardo ·") and "waiting on coder and Isaac" in ln
-        for ln in lines
-    )
-    assert any(
-        ln.startswith("PR-41 · pending · coder ·") and "waiting on engineering: Isaac" in ln
-        for ln in lines
-    )
-    assert "**Waiting on**" in lines
-    assert any(ln == "PR-41 · #feat-csv-export · engineering: Isaac" for ln in lines)
-    # the daily rebuild happens once per UTC day
-    assert not any("**Board**" in p.text for p in _posts(harness.sweep()))
-    harness.clock.advance(days=1)
-    assert any("**Board**" in p.text for p in _posts(harness.sweep()))
-    fx = harness.command("b2", "board", sender=JOHN, room=RELEASES)
-    assert _text(fx) == "The board is kept by @sindarin-switch in #product."
-
-
-def test_status_fences_optional(harness: Harness):
-    harness.switch.config.post_status_fences = True
-    harness.propose_spec()
-    fences = [p for p in harness.posts if is_status_fence(p.text)]
-    assert (
-        len(fences) == 1
-        and '"state":"pending"' in fences[0].text
-        and "@switch" not in fences[0].text
-    )
-    harness.approve_spec()
-    assert [p for p in harness.posts if is_status_fence(p.text)][-1].text.count(
-        '"state":"open"'
-    ) == 1
-
-
-def test_customer_room_has_no_executor(harness: Harness):
-    fx = harness.say(CUSTOMER, ISAAC, "@sindarin-switch approve SPEC-1", mid="c1")
-    assert fx == [] and harness.posts == []
-    assert (
-        RELEASE_AGENT.startswith("@switch-agent-")
-        and release_proposal(target_sha="a" * 40).kind.value == "release"
-    )
-    assert pr_proposal().kind.value == "pr"
+def test_finance_room_has_no_ledger_executor(harness: Harness):
+    """Only sindarin-switch sits in #acme-finance: a ledger command there reaches nobody who
+    acts on it (Switch delivers to members only); the switch executor just records the message."""
+    fx = harness.say(FINANCE, JOHN, "@sindarin-ledger approve BUDGET-1", mid="nf", addressed=False)
+    assert _posts(fx) == [] and harness.ledger.store.get_message("nf") is None

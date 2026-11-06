@@ -1,43 +1,47 @@
-# Test policy (DDD §10.1, §15.3). Ids are synthetic; the shapes follow §12.1.
-version: 2
+# Test policy (design v5 §6): the management team of the adversarial tests. Ids are fixtures.
+version: 3
+
 groups:
-  pm: ["@switch-user-leonardo:test"]
-  engineering: ["@switch-user-isaac:test"]
-  release: ["@switch-user-john:test"]
+  cfo: ["@switch-user-john:test"]
+  controllers: ["@switch-user-leonardo:test"]
+  board: ["@switch-user-isaac:test"]
+  # Vincent (sales) is in no group
+
 proposers:
-  product: "@switch-agent-product:test"
-  coder: "@switch-agent-coder:test"
-  reviewer: "@switch-agent-reviewer:test"
-  release: "@switch-agent-release:test"
+  analyst: "@switch-agent-analyst:test"
+  planner: "@switch-agent-planner:test"
+  bookkeeper: "@switch-agent-bookkeeper:test"
+
 executors:
   sindarin-switch: "@switch-agent-sindarin-switch:test"
-  sindarin-github: "@switch-agent-sindarin-github:test"
+  sindarin-ledger: "@switch-agent-sindarin-ledger:test"
+
 rooms:
-  product: "!room-product:test"
-  releases: "!room-releases:test"
-  customer: "!room-acme-shared:test"
+  finance: "!room-acme-finance:test"
+  planning: "!room-planning:test"
+
 rules:
-  - name: spec
-    kind: spec
-    proposer: product
-    approvers: pm
-    room: product
-    allowed_repos: ["acme/sindarin-demo-app"]
-    engineers: engineering
+  - name: goals
+    kind: goals
+    proposer: planner
+    approvers: cfo
+    also_invite: controllers
+    room: finance
+    currency: USD
     pending_ttl: 24h
-  - name: merge
-    kind: pr
-    proposer: coder
-    approvers: engineering
-    room: feature
-    repo: "acme/sindarin-demo-app"
-    base: main
+  - name: budget
+    kind: budget
+    proposer: planner
+    approvers: board
+    approvers_under_limit: cfo
+    limit_cents: 1000000
+    room: planning
+    currency: USD
     pending_ttl: 24h
-  - name: release
-    kind: release
-    proposer: release
-    approvers: release
-    room: releases
-    repo: "acme/sindarin-demo-app"
-    tag_pattern: "^v\\d+\\.\\d+\\.\\d+$"
+  - name: entries
+    kind: entries
+    proposer: bookkeeper
+    approvers: controllers
+    room: period
+    currency: USD
     pending_ttl: 24h

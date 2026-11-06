@@ -1,67 +1,62 @@
-"""Test 5 — Changed after proposal (DDD §15.3).
+"""Test 5 — The ledger changed between proposal and approval (design v5 §5, A6).
 
-A commit lands on the PR branch after the proposal (and its review) and before the engineer's
-approval. A6 must refuse: the head re-read from GitHub differs from the snapshot. Approvals are
-cleared, a notice is posted, no merge. A second approval on the new snapshot merges.
+BUDGET-1 is pending, built on October's actuals. A late October sale of 3,980.00 USD lands in
+the books. Isaac's approval is refused with the difference in plain money, the snapshot is
+replaced and the planner is asked to propose again. The re-proposal keeps the id; Isaac
+approves; the budget is recorded.
 """
 
 from __future__ import annotations
 
 from sindarin.executor import core
-from validation.harness import FEATURE, Harness, write_report
+from validation.harness import ISAAC, Harness, write_report
 
 
-def test_changed_after_approval(harness: Harness):
+def _posts(fx):
+    return [e for e in fx if isinstance(e, core.Post)]
+
+
+def test_changed_after_proposal(harness: Harness):
     h = harness
-    h.run_spec_gate()
-    h.open_pull(41)
-    h.propose_pr()
-    h.review()
-    old_sha = h.pr().snapshot_sha
-    old_head = h.gh.pulls[41].head_sha
+    h.run_goals_gate()
+    h.propose_budget()
+    before = h.budget().snapshot_sha
+    h.books.add_sale("S-2026-1055", "2026-10-30", "Contoso Ltd", 398000)
 
-    new_head = h.gh.push(41)  # the branch moved under the approver
-    fx = h.approve_pr("m-ok-1")
-    texts = [e.text for e in fx if isinstance(e, core.Post)]
-    assert texts[0].startswith("**PR-41** changed since it was proposed (head_sha ")
-    assert old_head[:7] in texts[0] and new_head[:7] in texts[0]
-    assert texts[0].endswith("Approvals cleared; it is pending again.")
-    assert texts[1].startswith("**PR-41** not applied — it changed since it was proposed")
-    assert h.gh.count("execute") == 0, "no merge"
-    a = h.pr()
-    assert a.state.value == "pending" and a.snapshot_sha != old_sha
-    assert a.facts()["head_sha"] == new_head and a.approver_id is None
-    assert h.audit_events()[-2:] == ["snapshot_changed", "refused_approval:snapshot_changed"]
-    assert h.github.store.approvals_for("PR-41") == []
+    fx = h.approve_budget("m-approve-1", sender=ISAAC)
+    texts = [p.text for p in _posts(fx)]
+    assert any(
+        t.startswith(
+            "**BUDGET-1** changed since it was proposed: 2026-10 revenue 89,905.00 USD → "
+            "93,885.00 USD, sales rows 13 → 14."
+        )
+        for t in texts
+    ), texts
+    assert any(
+        t == "**BUDGET-1** not applied — the ledger changed since the proposal "
+        "(2026-10 revenue 89,905.00 USD → 93,885.00 USD, sales rows 13 → 14)."
+        for t in texts
+    )
+    a = h.budget()
+    assert a.state.value == "pending" and a.snapshot_sha != before and h.recorded() == []
+    assert "approved" not in h.audit_events()
 
-    # the reviewer's report is now at an older sha; status says so
-    fx = h.command("m-st", "status PR-41", sender="@switch-user-isaac:test", room=FEATURE)
-    status = [e for e in fx if isinstance(e, core.Post)][0].text
-    assert f"at `{old_head[:7]}`" in status
-
-    # Approve again on the new snapshot → merged.
-    fx = h.approve_pr("m-ok-2")
-    assert h.pr().state.value == "merged" and h.gh.pulls[41].merged
-    assert h.gh.pulls[41].merge_commit_sha and h.gh.count("execute") == 1
+    # the planner proposes again from the current rows, in the same thread: same id
+    h.propose_budget("m-budget-2", thread="m-budget-1")
+    assert h.budget().seq >= 1 and h.budget().state.value == "pending"
+    h.approve_budget("m-approve-2", sender=ISAAC)
+    assert h.budget().state.value == "recorded" and len(h.recorded()) == 4
     h.assert_no_leaks()
-
     write_report(
         "test_05_changed_after_approval",
-        "Test 5 · Changed after proposal",
-        """
-`PR-41` is proposed and reviewed at head `A`. A new commit lands on the branch (head `B`).
-Isaac then types `approve PR-41`. The executor re-reads the pull request from GitHub before
-writing anything (A6). Isaac approves a second time on the new snapshot.
-""",
+        "Test 5 — The ledger changed between proposal and approval",
+        __doc__ or "",
         h,
-        """
-**PASS.** The first approval was refused with `refused_approval:snapshot_changed`: the notice
-named the old and new head, the artifact was re-snapshotted at `B`, approvals were cleared,
-and GitHub was not asked to merge. The second approval merged `B`; GitHub's own `sha` guard
-would have refused anything else.
-""",
+        "PASS: the yes was refused with the changed revenue, the snapshot replaced, the "
+        "re-proposal approved and recorded.",
         [
-            "A6 refuses; approvals cleared; pending notice posted; no merge",
-            "a second approval on the new snapshot merges",
+            "the refusal names the basis month and both revenues in money",
+            "the snapshot is replaced; nothing is recorded on the stale yes",
+            "the re-proposal keeps the id and is recorded",
         ],
     )

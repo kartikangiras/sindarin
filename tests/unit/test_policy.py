@@ -1,23 +1,26 @@
-"""DDD §10.1: groups, proposers, executors, rooms, rules by kind; the P2/P3/P4 checks."""
+"""policy.yaml (design v5 §6): rules per kind, the budget limit, the P2/P3/P4 checks."""
 
 from __future__ import annotations
 
 import pytest
 from pydantic import ValidationError
 from validation.harness import (
-    CODER_AGENT,
+    BASIS,
+    BOOKKEEPER_AGENT,
+    DATA,
     FIXTURES,
-    GITHUB_EXEC,
     ISAAC,
+    JOHN,
     LEONARDO,
-    PRODUCT_AGENT,
-    REPO,
+    PLANNER_AGENT,
+    POLICY,
     VINCENT,
-    pr_proposal,
-    release_proposal,
-    spec_proposal,
+    budget_proposal,
+    entries_proposal,
+    goals_proposal,
 )
 
+from sindarin.ledger import Ledger
 from sindarin.policy import (
     Policy,
     check_facts,
@@ -31,196 +34,105 @@ from sindarin.schema import Kind
 
 
 @pytest.fixture
-def policy() -> Policy:
-    return load_policy(FIXTURES / "policy.yaml")
+def books(tmp_path):
+    ledger = Ledger(tmp_path / "books.db")
+    ledger.import_dir(DATA / BASIS)
+    yield ledger
+    ledger.close()
 
 
-@pytest.mark.parametrize(
-    "text,seconds,shortest",
-    [("7d", 604800, "7d"), ("24h", 86400, "1d"), ("10m", 600, "10m"), ("90m", 5400, "90m")],
-)
-def test_parse_duration(text, seconds, shortest):
-    assert parse_duration(text) == seconds and format_duration(seconds) == shortest
+def test_fixture_policy_loads_and_resolves():
+    p = load_policy(FIXTURES / "policy.yaml")
+    assert p.in_group(LEONARDO, "controllers") and p.in_group(JOHN, "cfo")
+    assert p.in_group(ISAAC, "board") and p.groups_of(VINCENT) == []
+    assert p.proposer_id("planner") == PLANNER_AGENT and p.role_of(BOOKKEEPER_AGENT) == "bookkeeper"
+    assert p.executor_of("@switch-agent-sindarin-ledger:test") == "sindarin-ledger"
+    assert [r.kind for r in p.rules] == [Kind.GOALS, Kind.BUDGET, Kind.ENTRIES]
+    budget = p.rule("budget")
+    assert budget.approver_groups(1600000) == ["board"]
+    assert budget.approver_groups(880000) == ["board", "cfo"]
+    assert budget.approver_groups(None) == ["board"]
+    assert p.rule("goals").also_invite == "controllers" and p.rule("entries").room == "period"
 
 
-@pytest.mark.parametrize("text", ["7", "7D", "1w", "0m", "-1d", "", "1.5h"])
-def test_parse_duration_rejects(text):
-    with pytest.raises(ValueError):
-        parse_duration(text)
+def test_durations():
+    assert parse_duration("24h") == 86400 and parse_duration("30m") == 1800
+    assert format_duration(172800) == "2d" and format_duration(90) == "90s"
+    for bad in ("", "1w", "0h", "-5m"):
+        with pytest.raises(ValueError):
+            parse_duration(bad)
 
 
-def test_fixture_policy_shape(policy):
-    assert [r.name for r in policy.rules] == ["spec", "merge", "release"]
-    assert [r.kind for r in policy.rules] == [Kind.SPEC, Kind.PR, Kind.RELEASE]
-    assert policy.group_members("pm") == [LEONARDO]
-    assert policy.in_group(ISAAC, "engineering") and not policy.in_group(VINCENT, "engineering")
-    assert not policy.in_group(ISAAC.upper(), "engineering") and not policy.in_group("", "pm")
-    assert policy.groups_of(ISAAC) == ["engineering"] and policy.groups_of(VINCENT) == []
-    assert policy.proposer_id("coder") == CODER_AGENT and policy.role_of(CODER_AGENT) == "coder"
-    assert policy.executor_id("sindarin-github") == GITHUB_EXEC
-    assert policy.executor_of(GITHUB_EXEC) == "sindarin-github"
-    assert GITHUB_EXEC in policy.agent_ids and PRODUCT_AGENT in policy.agent_ids
-    assert ISAAC not in policy.agent_ids
-    assert policy.room_key("!room-product:test") == "product" and policy.room_key("!x") is None
-    assert policy.rules_for(Kind.PR)[0].room == "feature"
-    assert policy.rule("merge").pending_ttl_seconds == 86400
+def _data(mutate):
+    import yaml
+
+    data = yaml.safe_load((FIXTURES / "policy.yaml").read_text())
+    mutate(data)
+    return data
 
 
-def test_demo_policy_loads(repo_root):
-    p = load_policy(repo_root / "agents" / "policy" / "policy.yaml")
-    assert {r.kind for r in p.rules} == set(Kind)
-    assert set(p.groups) == {"pm", "engineering", "release"}
-    assert set(p.proposers) == {"product", "coder", "reviewer", "release"}
-    assert set(p.executors) == {"sindarin-switch", "sindarin-github"}
-
-
-def _base() -> dict:
-    return {
-        "version": 2,
-        "groups": {"pm": ["@a:t"], "engineering": ["@b:t"], "release": ["@c:t"]},
-        "proposers": {"product": "@p:t", "coder": "@q:t", "reviewer": "@r:t", "release": "@s:t"},
-        "executors": {"sindarin-switch": "@x:t", "sindarin-github": "@y:t"},
-        "rooms": {"product": "!p", "releases": "!r", "customer": "!c"},
-        "rules": [],
-    }
-
-
-def _rule(**over) -> dict:
-    base = {
-        "name": "merge",
-        "kind": "pr",
-        "proposer": "coder",
-        "approvers": "engineering",
-        "room": "feature",
-        "repo": "o/r",
-    }
-    base.update(over)
-    return base
-
-
-@pytest.mark.parametrize(
-    "rule,fragment",
-    [
-        (_rule(approvers="ceo"), "approvers group 'ceo'"),
-        (_rule(proposer="intern"), "proposer 'intern'"),
-        (_rule(room="product"), "merges are approved in the feature room"),
-        (_rule(repo=""), "needs repo owner/repo"),
-        (
-            _rule(kind="spec", name="spec", proposer="product", approvers="pm", room="product"),
-            "needs allowed_repos",
-        ),
-        (
-            _rule(
-                kind="spec",
-                name="spec",
-                proposer="product",
-                approvers="pm",
-                room="feature",
-                allowed_repos=["o/r"],
-            ),
-            "named room",
-        ),
-        (
-            _rule(
-                kind="release",
-                name="rel",
-                proposer="release",
-                approvers="release",
-                room="lounge",
-                repo="o/r",
-            ),
-            "not a known room",
-        ),
-        (_rule(pending_ttl="1w"), "bad duration"),
-        (
-            _rule(
-                kind="release",
-                name="rel",
-                proposer="release",
-                approvers="release",
-                room="releases",
-                repo="o/r",
-                tag_pattern="(",
-            ),
-            "tag_pattern",
-        ),
-        (_rule(merge_method="ff"), "merge_method"),
-    ],
-)
-def test_rule_validation(rule, fragment):
-    with pytest.raises(ValidationError) as exc:
-        Policy.model_validate({**_base(), "rules": [rule]})
-    assert fragment in str(exc.value)
-
-
-def test_policy_level_validation():
-    with pytest.raises(ValidationError, match="unique"):
-        Policy.model_validate({**_base(), "rules": [_rule(), _rule()]})
-    with pytest.raises(ValidationError, match="not a participant id"):
-        Policy.model_validate({**_base(), "groups": {"pm": ["Leonardo"]}})
-    with pytest.raises(ValidationError, match="unknown proposer role"):
-        Policy.model_validate({**_base(), "proposers": {"ceo": "@a:t"}})
-    with pytest.raises(ValidationError, match="unknown executor"):
-        Policy.model_validate({**_base(), "executors": {"frodo": "@a:t"}})
+def test_rules_are_validated():
+    with pytest.raises(ValidationError, match="approved in the plan room"):
+        Policy.model_validate(_data(lambda d: d["rules"][2].__setitem__("room", "planning")))
+    with pytest.raises(ValidationError, match="named room"):
+        Policy.model_validate(_data(lambda d: d["rules"][0].__setitem__("room", "period")))
+    with pytest.raises(ValidationError, match="go together"):
+        Policy.model_validate(_data(lambda d: d["rules"][1].pop("approvers_under_limit")))
+    with pytest.raises(ValidationError, match="only a budget rule has a limit"):
+        Policy.model_validate(
+            _data(lambda d: d["rules"][2].update(limit_cents=1, approvers_under_limit="cfo"))
+        )
+    with pytest.raises(ValidationError, match="is not defined"):
+        Policy.model_validate(_data(lambda d: d["rules"][0].__setitem__("also_invite", "exec")))
     with pytest.raises(ValidationError, match="unknown room key"):
-        Policy.model_validate({**_base(), "rooms": {"lounge": "!x"}})
+        Policy.model_validate(_data(lambda d: d["rooms"].__setitem__("payments", "!x:t")))
+    with pytest.raises(ValidationError, match="unknown proposer role"):
+        Policy.model_validate(_data(lambda d: d["proposers"].__setitem__("treasury", "@c:t")))
+    with pytest.raises(ValidationError, match="currency"):
+        Policy.model_validate(_data(lambda d: d["rules"][1].__setitem__("currency", "XYZ")))
 
 
-def test_check_proposer(policy):
-    assert check_proposer(policy, spec_proposal(), PRODUCT_AGENT) is None
-    assert "only product may propose" in check_proposer(policy, spec_proposal(), CODER_AGENT)
-    assert "only product may propose" in check_proposer(policy, spec_proposal(), ISAAC)
-    assert "unknown rule" in check_proposer(policy, pr_proposal(rule="nope"), CODER_AGENT)
-    bad_kind = pr_proposal(rule="spec")
-    assert "is for spec proposals" in check_proposer(policy, bad_kind, CODER_AGENT)
-    empty = Policy.model_validate({**_base(), "proposers": {"coder": ""}, "rules": [_rule()]})
-    assert "only coder may propose" in check_proposer(empty, pr_proposal(repo="o/r"), "")
+def test_check_proposer_is_by_id_and_rule(books):
+    budget = budget_proposal(books)
+    assert check_proposer(POLICY, budget, PLANNER_AGENT) is None
+    assert "only planner may propose" in check_proposer(POLICY, budget, BOOKKEEPER_AGENT)
+    assert "only planner may propose" in check_proposer(POLICY, budget, JOHN)
+    entries = entries_proposal(books)
+    assert check_proposer(POLICY, entries, BOOKKEEPER_AGENT) is None
+    assert "only bookkeeper" in check_proposer(POLICY, entries, PLANNER_AGENT)
 
 
-def test_check_target(policy):
-    assert check_target(policy, spec_proposal()) is None
-    assert "not allowed by rule spec" in check_target(policy, spec_proposal(repo="acme/other"))
-    assert "engineer is not in group engineering" in check_target(
-        policy, spec_proposal(engineer=VINCENT)
+def test_check_target_and_facts(books):
+    goals = goals_proposal(books)
+    assert check_target(POLICY, goals) is None
+    with pytest.raises(ValueError, match="below the revenue target"):
+        goals_proposal(books, cost_cap_cents=9500000)  # the builder runs check_target itself
+    budget = budget_proposal(books)
+    assert check_target(POLICY, budget) is None
+    good = {
+        "accounts": ["6000", "6200"],
+        "cap_cents": 1600000,
+        "basis_status": "open",
+        "total_cents": 1600000,
+        "digest": books.actuals_digest(BASIS),
+    }
+    assert check_facts(POLICY, budget, good) is None
+    assert "over the cap 15,000.00 USD in GOALS-1" in check_facts(
+        POLICY, budget, {**good, "cap_cents": 1500000}
     )
-    assert check_target(policy, pr_proposal()) is None
-    assert "not allowed by rule merge" in check_target(policy, pr_proposal(repo="acme/other"))
-    assert check_target(policy, release_proposal(target_sha="a" * 40)) is None
-    assert "does not match" in check_target(policy, release_proposal(tag="v9", target_sha="a" * 40))
-    assert REPO in check_target(policy, pr_proposal(repo="acme/other"))
-
-
-def test_check_facts(policy):
-    good = {"head_sha": "a" * 40, "base": "main", "state": "open", "merged": False, "draft": False}
-    assert check_facts(policy, pr_proposal(), good) is None
-    assert "not open" in check_facts(policy, pr_proposal(), {**good, "state": "closed"})
-    assert "already merged" in check_facts(policy, pr_proposal(), {**good, "merged": True})
-    assert "draft" in check_facts(policy, pr_proposal(), {**good, "draft": True})
-    assert "merges into main" in check_facts(policy, pr_proposal(), {**good, "base": "develop"})
-    assert "head sha" in check_facts(policy, pr_proposal(), {**good, "head_sha": ""})
-    rel = release_proposal(target_sha="a" * 40)
-    assert check_facts(policy, rel, {"commit_exists": True, "tag_exists": False}) is None
-    assert "already exists" in check_facts(policy, rel, {"commit_exists": True, "tag_exists": True})
-    assert "not a commit" in check_facts(policy, rel, {"commit_exists": False, "tag_exists": False})
-    assert check_facts(policy, spec_proposal(), {}) is None
-
-
-def test_no_secret_strings_in_agent_dirs(repo_root):
-    """The agents' folders hold no GitHub credential and no key outside gitignored .env files."""
-    import subprocess
-
-    for path in (repo_root / "agents").rglob("*"):
-        if not path.is_file() or ".switch" in path.parts or ".claude" in path.parts:
-            continue
-        text = path.read_text(encoding="utf-8", errors="ignore")
-        if path.name == ".env":
-            # the coder's scoped GitHub token lives here by design (DDD §4.2); the file must be ignored
-            ignored = subprocess.run(
-                ["git", "check-ignore", "-q", str(path)], cwd=repo_root, check=False
-            )
-            assert ignored.returncode == 0, f"{path} must be gitignored"
-        elif path.name != ".env.example":
-            has_token = "ghp_" in text or "github_pat_" in text
-            assert not has_token, path
-            assert "SWITCH_AGENT_API_KEY" not in text and "ANTHROPIC_API_KEY" not in text, path
-            assert "GITHUB_TOKEN" not in text, path
+    assert "account 6200 is not in the chart" in check_facts(
+        POLICY, budget, {**good, "accounts": ["6000"]}
+    )
+    assert "no rows" in check_facts(POLICY, budget, {**good, "basis_status": "unknown"})
+    entries = entries_proposal(books)
+    lines = [x.model_dump() for x in entries.body.lines]
+    ok = {"period_status": "open", "budget_id": "BUDGET-1", "budget_lines": lines}
+    assert check_facts(POLICY, entries, ok) is None
+    assert "no budget is recorded" in check_facts(POLICY, entries, {**ok, "budget_lines": []})
+    assert "is BUDGET-2, not BUDGET-1" in check_facts(
+        POLICY, entries, {**ok, "budget_id": "BUDGET-2"}
+    )
+    assert "differ from the budget recorded" in check_facts(
+        POLICY, entries, {**ok, "budget_lines": lines[1:]}
+    )
+    assert "is planned, already" in check_facts(POLICY, entries, {**ok, "period_status": "planned"})

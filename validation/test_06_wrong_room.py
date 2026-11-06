@@ -1,60 +1,49 @@
-"""Test 6 — Wrong room (DDD §15.3, new).
+"""Test 6 — Wrong room (design v5 §6, A5).
 
-`approve REL-1` posted in a feature room, where sindarin-github also listens, must be refused
-with the room template. The same command in #releases applies.
+The budget is approved in #planning, its register entries in the plan room. An
+`approve ENTRIES-1` typed in #planning is refused with the room; an `approve BUDGET-1` typed in
+the plan room the same; a budget proposed in the plan room is not even recorded.
 """
 
 from __future__ import annotations
 
 from sindarin.executor import core
-from validation.harness import FEATURE, JOHN, RELEASES, Harness, write_report
+from validation.harness import ISAAC, LEONARDO, PERIOD_ROOM, PLANNING, Harness, write_report
+
+
+def _post(fx):
+    return [e for e in fx if isinstance(e, core.Post)][0]
 
 
 def test_wrong_room(harness: Harness):
     h = harness
-    h.run_spec_gate()
-    h.run_merge_gate()
-    h.propose_release()
-    assert h.rel().state.value == "pending"
-
-    fx = h.command("m-wr-1", "approve REL-1", sender=JOHN, room=FEATURE)
-    post = [e for e in fx if isinstance(e, core.Post)][0]
-    assert post.room_id == FEATURE
-    assert post.text == "**REL-1** not applied — I take release commands in #releases only."
-    assert "refused_approval:wrong_room" in h.audit_events()
-    assert h.gh.count("execute") == 1  # the merge only
-    assert h.rel().state.value == "pending"
-
-    # and a merge command in #releases is refused the same way
-    h.open_pull(42)
-    h.propose_pr("m-pr-2", number=42, spec="SPEC-1")
-    fx = h.command("m-wr-2", "approve PR-42", sender="@switch-user-isaac:test", room=RELEASES)
-    post = [e for e in fx if isinstance(e, core.Post)][0]
-    assert post.text == "**PR-42** not applied — I take pr commands in #feat-csv-export only."
-
-    fx = h.approve_release("m-ok-rel")
-    assert h.rel().state.value == "published"
-    assert "v1.4.0" in h.gh.tags and h.gh.count("execute") == 2
-    post = [e for e in fx if isinstance(e, core.Post)][0]
-    assert post.text.startswith("**REL-1** approved by John · published https://github.com/")
+    h.run_goals_gate()
+    fx = h.propose_budget(room=PERIOD_ROOM, mid="m-budget-wrong")
+    assert _post(fx).text == "Proposal not recorded — I take budget proposals in #planning only."
+    h.propose_budget()
+    fx = h.approve_budget("m-wrong-1", sender=ISAAC, room=PERIOD_ROOM, thread=None)
+    assert _post(fx).text == "**BUDGET-1** not applied — I take budget commands in #planning only."
+    h.approve_budget("m-ok", sender=ISAAC)
+    h.sweep()
+    h.propose_entries()
+    fx = h.approve_entries("m-wrong-2", sender=LEONARDO, room=PLANNING, thread=None)
+    assert _post(fx).text == (
+        "**ENTRIES-1** not applied — I take entries commands in #plan-2026-11 only."
+    )
+    assert h.books.period_status("2026-11") == "open"
+    h.approve_entries("m-ok-2")
+    assert h.entries().state.value == "planned" and h.books.period_status("2026-11") == "planned"
     h.assert_no_leaks()
-
     write_report(
         "test_06_wrong_room",
-        "Test 6 · Wrong room",
-        """
-`REL-1` is pending in `#releases`. John, a release approver, types `@sindarin-github approve
-REL-1` in the feature room instead. Isaac types `approve PR-42` in `#releases`. John then
-approves `REL-1` in `#releases`.
-""",
+        "Test 6 — Wrong room",
+        __doc__ or "",
         h,
-        """
-**PASS.** Both misplaced commands were refused with the room template (A5) and audited as
-`refused_approval:wrong_room`; nothing was executed. The same approval in the right room
-published the release, verified by read-back.
-""",
+        "PASS: commands and proposals in the wrong room were refused with the right room named; "
+        "the entries landed only from the plan room.",
         [
-            "refused with the room template",
-            "the same command in the rule's room applies",
+            "a proposal in the wrong room is not recorded",
+            "an approve in the wrong room is refused and names the room",
+            "the period is planned only from its own room",
         ],
     )

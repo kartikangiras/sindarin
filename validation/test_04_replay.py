@@ -1,76 +1,47 @@
-"""Test 4 — Replay (DDD §15.3).
+"""Test 4 — Replay (design v5 §6).
 
-Isaac approves PR-41 twice; then the original approve message is re-delivered (same message
-id). Must observe: one merge call; the second approval refused as not pending; the redelivery
-produces nothing.
+Isaac approves BUDGET-1; the ledger records once. Isaac approves again: "not pending". The
+approval message is redelivered with the same id: no effects at all. Must observe: one record,
+one `applied` audit row, four lines recorded exactly once.
 """
 
 from __future__ import annotations
 
 from sindarin.executor import core
-from validation.harness import FEATURE, ISAAC, Harness, write_report
+from validation.harness import ISAAC, PLANNING, Harness, write_report
+
+
+def _post(fx):
+    return [e for e in fx if isinstance(e, core.Post)][0]
 
 
 def test_replay(harness: Harness):
     h = harness
-    h.run_spec_gate()
-    h.open_pull(41)
-    h.propose_pr()
-    h.review()
+    h.run_goals_gate()
+    h.propose_budget()
+    h.approve_budget("m-approve-1", sender=ISAAC)
+    assert h.budget().state.value == "recorded" and len(h.recorded()) == 4
 
-    first = h.approve_pr("m-ok-1")
-    kinds = [type(e).__name__ for e in first]
-    assert kinds.index("Transition") < kinds.index("Execute"), "state is written before the call"
-    assert [e.state.value for e in first if isinstance(e, core.Transition)] == [
-        "approved",
-        "executing",
-        "merged",
-    ]
-    a = h.pr()
-    assert a.state.value == "merged" and a.approver_name == "Isaac" and a.snapshot_sha
-    assert h.gh.count("execute") == 1 and h.gh.pulls[41].merged
-    assert h.posts_to(FEATURE)[-1].text.startswith("**PR-41** approved by Isaac · merged as `")
-    assert "applied" in h.audit_events()
+    fx = h.approve_budget("m-approve-2", sender=ISAAC)
+    assert _post(fx).text == "**BUDGET-1** is recorded, not pending."
 
-    second = h.approve_pr("m-ok-2")
-    post = [e for e in second if isinstance(e, core.Post)][0]
-    assert post.text == "**PR-41** is merged, not pending."
-    assert h.gh.count("execute") == 1
-
-    # A redelivery of the *same message* (reconnect) is dropped entirely.
-    dup = h.say(
-        FEATURE,
-        ISAAC,
-        "@sindarin-github approve PR-41",
-        mid="m-ok-1",
-        thread="m-pr-1",
-        label="redelivery of m-ok-1",
+    fx = h.say(
+        PLANNING, ISAAC, "@sindarin-ledger approve BUDGET-1", mid="m-approve-1", thread="m-budget-1"
     )
-    assert dup == []
+    assert fx == [], "a redelivered message id produces nothing"
 
-    assert h.gh.count("execute") == 1, "exactly one merge call total"
-    assert h.audit_events().count("refused_approval:not_pending") == 1
-    assert len(h.github.store.approvals_for("PR-41")) == 1
+    assert len(h.recorded()) == 4
+    assert h.audit_events().count("applied") == 1
     h.assert_no_leaks()
-
     write_report(
         "test_04_replay",
-        "Test 4 · Replay",
-        """
-`PR-41` is approved by Isaac in the feature room. Isaac posts `approve PR-41` again; the
-WebSocket then redelivers the original approval message id.
-""",
+        "Test 4 — Replay",
+        __doc__ or "",
         h,
-        """
-**PASS.** The first approval moved `PR-41` `pending → approved → executing → merged` with the
-`approved` and `executing` rows written before GitHub was called, and produced exactly one
-merge. The second approval was refused with `refused_approval:not_pending` ("PR-41 is merged,
-not pending"). The redelivered message id produced no effects at all. One approval row, one
-merge call.
-""",
+        "PASS: one record; the second yes answered not pending; the redelivery was ignored.",
         [
-            "first → merged (one adapter call)",
-            "second → `refused_approval:not_pending`",
-            "redelivered message id → nothing",
+            "one `applied` row",
+            "a second approve answers not pending",
+            "a redelivery has no effects",
         ],
     )

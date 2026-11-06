@@ -1,75 +1,74 @@
-"""Test 2 — Forged approval (DDD §15.3).
+"""Test 2 — Forged approval (design v5 §6).
 
-`coder` (the proposing agent) posts `@sindarin-github approve PR-41`; Vincent (no group) posts
-the same; an impostor whose display name is "Isaac" but whose id is not Isaac's posts the same.
-Must observe: refused with the agent template and the not-approver template; no adapter call.
+`planner` (the proposing agent) posts `@sindarin-ledger approve BUDGET-1`; Vincent (no group)
+posts the same; an impostor whose display name is "Isaac" but whose id is not Isaac's posts the
+same. Must observe: refused with the agent template and the not-approver template; the ledger
+is not written. Then Isaac, by participant id, approves and the budget is recorded.
 """
 
 from __future__ import annotations
 
 from sindarin.executor import core
-from validation.harness import CODER_AGENT, FEATURE, VINCENT, Harness, write_report
+from validation.harness import ISAAC, PLANNER_AGENT, PLANNING, VINCENT, Harness, write_report
 
 
 def _post(fx):
     return [e for e in fx if isinstance(e, core.Post)][0]
 
 
+def _all(fx):
+    return [e for e in fx if isinstance(e, core.Post)]
+
+
 def test_forged_approval(harness: Harness):
     h = harness
-    h.run_spec_gate()
-    h.open_pull(41)
-    h.propose_pr()
-    h.review()
-    assert h.pr().state.value == "pending"
-    executes_before = h.gh.count("execute")
+    h.run_goals_gate()
+    h.propose_budget()
+    assert h.budget().state.value == "pending"
 
-    fx = h.approve_pr("m-forge-1", sender=CODER_AGENT)
-    assert _post(fx).text == "**PR-41** not applied — @coder is an agent, not an approver."
-    assert _post(fx).room_id == FEATURE and _post(fx).thread_id == "m-pr-1"
+    fx = h.approve_budget("m-forge-1", sender=PLANNER_AGENT)
+    assert _post(fx).text == "**BUDGET-1** not applied — @planner is an agent, not an approver."
+    assert _post(fx).room_id == PLANNING and _post(fx).thread_id == "m-budget-1"
 
-    fx = h.approve_pr("m-forge-2", sender=VINCENT)
-    assert _post(fx).text == "**PR-41** not applied — Vincent is not in the engineering group."
+    fx = h.approve_budget("m-forge-2", sender=VINCENT)
+    assert _post(fx).text == "**BUDGET-1** not applied — Vincent is not in the board group."
 
     fx = h.say(
-        FEATURE,
+        PLANNING,
         "@switch-user-imposter:test",
-        "@sindarin-github approve PR-41",
+        "@sindarin-ledger approve BUDGET-1",
         mid="m-forge-3",
         name="Isaac",
+        thread="m-budget-1",
     )
-    assert _post(fx).text == "**PR-41** not applied — Isaac is not in the engineering group."
-
-    refusals = [e for e in h.github.store.audit_all() if e.event.startswith("refused_approval")]
-    assert [e.event for e in refusals] == [
+    assert _post(fx).text == "**BUDGET-1** not applied — Isaac is not in the board group."
+    assert h.recorded() == [] and h.budget().state.value == "pending"
+    refusals = [e for e in h.audit_events() if e.startswith("refused_approval")]
+    assert refusals == [
         "refused_approval:agent",
         "refused_approval:not_approver",
         "refused_approval:not_approver",
     ]
-    assert [e.actor_id for e in refusals] == [CODER_AGENT, VINCENT, "@switch-user-imposter:test"]
-    assert h.gh.count("execute") == executes_before == 0
-    assert h.pr().state.value == "pending"
-    assert h.github.store.approvals_for("PR-41") == []
-    h.assert_no_leaks()
 
+    fx = h.approve_budget("m-real", sender=ISAAC)
+    assert h.budget().state.value == "recorded"
+    assert h.recorded() == ["engineering", "general-admin", "marketing", "sales"]
+    assert any(
+        p.text.startswith("**BUDGET-1** approved by Isaac · recorded 16,000.00 USD")
+        for p in _all(fx)
+    )
+    h.assert_no_leaks()
     write_report(
         "test_02_forged_approval",
-        "Test 2 · Forged approval",
-        """
-With `PR-41` pending in the feature room (reviewer reported 4 of 4), three non-approvers type
-`@sindarin-github approve PR-41` there: `coder`, the agent that proposed the merge; Vincent, a
-person in no approver group; and an impostor whose display name is "Isaac" (the real engineer)
-but whose participant id is not Isaac's.
-""",
+        "Test 2 — Forged approval",
+        __doc__ or "",
         h,
-        """
-**PASS.** The agent was refused with the agent template ("@coder is an agent, not an
-approver"), Vincent and the impostor with the not-approver template. Identity was matched on
-participant id only: the display name "Isaac" did not help. No adapter write, no approval row,
-no state change; `PR-41` is still pending.
-""",
+        "PASS: three forged approvals refused by participant id, nothing recorded; Isaac's "
+        "approval recorded the budget once.",
         [
-            "both refused with the agent and not-approver templates; no adapter call",
-            "display-name spoofing refused: approver match is by participant id",
+            "the proposing agent is refused as an agent",
+            "a person outside the board group is refused by id",
+            "an impostor with the right display name is refused by id",
+            "the ledger is written only after the real approval",
         ],
     )

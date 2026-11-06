@@ -1,81 +1,74 @@
-"""Harness for the adversarial tests (DDD §15.3): both executors on fake adapters, event builders
-in the real frame shape, a frozen clock, and a report writer. Everything runs against
-executor.core through two Effectors; no Switch, no GitHub."""
+"""Harness for the adversarial tests (design v5 §2, §8): both executors on a real ledger file and
+a fake Gateway, event builders in the real frame shape, a frozen clock, and a report writer.
+Everything runs against executor.core through two Effectors; no Switch, no network."""
 
 from __future__ import annotations
 
 import shutil
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import pytest
 import yaml
 
-from sindarin.adapters.fake import FAKE_TOKEN, FakeGitHub, FakeSwitchRooms, fake_sha
+from sindarin.adapters.fake import FakeSwitchRooms
+from sindarin.adapters.ledger import LedgerAdapter
+from sindarin.agents.finance import plan_goals, report_lines, standard_budget_lines
 from sindarin.executor import core
 from sindarin.executor.runner import Effector, RunnerConfig
-from sindarin.names import GITHUB_EXECUTOR, SWITCH_EXECUTOR
-from sindarin.schema import (
-    PROPOSAL_SCHEMA,
-    REVIEW_SCHEMA,
-    Artifact,
-    Proposal,
-    Review,
-    canonical_json,
-    is_status_fence,
-)
+from sindarin.ledger import Ledger
+from sindarin.names import LEDGER_EXECUTOR, SWITCH_EXECUTOR
+from sindarin.policy import load_policy
+from sindarin.propose import build_budget, build_entries, build_goals, render
+from sindarin.schema import Artifact, Proposal, canonical_json, is_status_fence
 from sindarin.store import Store
 from sindarin.switch.events import MessageEvent, message_envelope, parse_frame
 
 HERE = Path(__file__).resolve().parent
 FIXTURES = HERE / "fixtures"
 REPORTS = HERE / "reports"
+DATA = HERE.parent / "data" / "acme"
+POLICY = load_policy(FIXTURES / "policy.yaml")
 
-PRODUCT = "!room-product:test"
-RELEASES = "!room-releases:test"
-CUSTOMER = "!room-acme-shared:test"
-FEATURE = (
-    "!room-feat-csv-export:test"  # what FakeSwitchRooms names the room for slug feat-csv-export
-)
-SLUG = "feat-csv-export"
-REPO = "acme/sindarin-demo-app"
+BASIS = "2026-10"  # the month in the books
+PERIOD = "2026-11"  # the month being planned
+FINANCE = "!room-acme-finance:test"
+PLANNING = "!room-planning:test"
+PERIOD_ROOM = f"!room-plan-{PERIOD}:test"  # what FakeSwitchRooms names the room it opens
+ASK = "m-ask-1"  # the business's ask: the thread the goals live in
 
 ISAAC = "@switch-user-isaac:test"
 LEONARDO = "@switch-user-leonardo:test"
 JOHN = "@switch-user-john:test"
 VINCENT = "@switch-user-vincent:test"
-PRODUCT_AGENT = "@switch-agent-product:test"
-CODER_AGENT = "@switch-agent-coder:test"
-REVIEWER_AGENT = "@switch-agent-reviewer:test"
-RELEASE_AGENT = "@switch-agent-release:test"
+ANALYST_AGENT = "@switch-agent-analyst:test"
+PLANNER_AGENT = "@switch-agent-planner:test"
+BOOKKEEPER_AGENT = "@switch-agent-bookkeeper:test"
 SWITCH_EXEC = "@switch-agent-sindarin-switch:test"
-GITHUB_EXEC = "@switch-agent-sindarin-github:test"
+LEDGER_EXEC = "@switch-agent-sindarin-ledger:test"
 NAMES = {
     ISAAC: "Isaac",
     LEONARDO: "Leonardo",
     JOHN: "John",
     VINCENT: "Vincent",
-    PRODUCT_AGENT: "product",
-    CODER_AGENT: "coder",
-    REVIEWER_AGENT: "reviewer",
-    RELEASE_AGENT: "release",
+    ANALYST_AGENT: "analyst",
+    PLANNER_AGENT: "planner",
+    BOOKKEEPER_AGENT: "bookkeeper",
     SWITCH_EXEC: SWITCH_EXECUTOR,
-    GITHUB_EXEC: GITHUB_EXECUTOR,
+    LEDGER_EXEC: LEDGER_EXECUTOR,
 }
 ROOM_NAMES = {
-    PRODUCT: "#product",
-    RELEASES: "#releases",
-    CUSTOMER: "#acme-shared",
-    FEATURE: "#feat-csv-export",
+    FINANCE: "#acme-finance",
+    PLANNING: "#planning",
+    PERIOD_ROOM: f"#plan-{PERIOD}",
 }
 # which executor is a member of which room (Switch delivers events to members only)
 MEMBERS = {
-    PRODUCT: (SWITCH_EXECUTOR,),
-    RELEASES: (GITHUB_EXECUTOR,),
-    FEATURE: (GITHUB_EXECUTOR,),
-    CUSTOMER: (),
+    FINANCE: (SWITCH_EXECUTOR,),
+    PLANNING: (LEDGER_EXECUTOR,),
+    PERIOD_ROOM: (LEDGER_EXECUTOR, SWITCH_EXECUTOR),
 }
 
 T0 = datetime(2026, 11, 5, 12, 0, 0, tzinfo=UTC)
@@ -97,138 +90,118 @@ def room_name(room: str) -> str:
     return ROOM_NAMES.get(room, room)
 
 
-# -- fence builders ----------------------------------------------------------------------------
+# -- fence builders (the agents' tools, with the test ledger) ----------------------------------
 
 
-def spec_proposal(
+def goals_proposal(
+    books: Ledger,
     *,
-    title: str = "CSV export of orders",
-    engineer: str = ISAAC,
-    repo: str = REPO,
-    slug: str = SLUG,
-    criteria: list[str] | None = None,
-    ask: str = "m-ask-1",
-    justification: str = "Acme asked for a CSV export of orders",
+    period: str = PERIOD,
+    basis: str = BASIS,
+    title: str = "Plan November 2026",
+    summary: str = "November grows on October.",
+    ask: str = ASK,
+    justification: str = "the business asked for the plan",
+    cost_cap_cents: int | None = None,
+    revenue_target_cents: int | None = None,
+    rule: str | None = None,
 ) -> Proposal:
-    return Proposal(
-        schema=PROPOSAL_SCHEMA,
-        kind="spec",
-        platform="switch",
-        action="open_feature_room",
-        target=slug,
-        body={
-            "title": title,
-            "press_release": "Acme can now download their orders as a CSV file from the API.",
-            "faq": [
-                "Who is it for? Acme's finance team.",
-                "What does it cost? Nothing; it is part of the API.",
-                "When? Target date below.",
-            ],
-            "criteria": criteria
-            or [
-                "GET /orders.csv returns text/csv",
-                "a header row is present even when there are no orders",
-                "exports above 10,000 rows return 413 with a message",
-                "a test covers each of the above",
-            ],
-            "scope_in": ["CSV export endpoint"],
-            "scope_out": ["scheduled exports", "XLSX"],
-            "target_date": date(2026, 11, 7).isoformat(),
-            "engineer": engineer,
-            "repo": repo,
-        },
+    s = books.summary(basis)
+    goals = plan_goals(books, period, basis)
+    if cost_cap_cents is not None:
+        goals["cost_cap_cents"] = cost_cap_cents
+    if revenue_target_cents is not None:
+        goals["revenue_target_cents"] = revenue_target_cents
+    return build_goals(
+        POLICY,
+        period=period,
+        basis=basis,
+        title=title,
+        summary=summary,
+        report=report_lines(s),
         ask=ask,
-        rule="spec",
         justification=justification,
-    )
-
-
-def pr_proposal(
-    *,
-    number: int = 41,
-    title: str = "CSV export of orders",
-    branch: str = "feat/SPEC-1",
-    spec: str = "SPEC-1",
-    repo: str = REPO,
-    head_sha: str = "",
-    rule: str = "merge",
-) -> Proposal:
-    return Proposal(
-        schema=PROPOSAL_SCHEMA,
-        kind="pr",
-        platform="github",
-        action="merge_pr",
-        target=f"{repo}#{number}",
-        snapshot_hint=head_sha,
-        body={"number": number, "title": title, "branch": branch, "spec": spec},
-        ask="m-ask-1",
         rule=rule,
-        justification="all criteria met, reviewer 4 of 4",
+        **goals,
     )
 
 
-def release_proposal(
+def budget_proposal(
+    books: Ledger,
     *,
-    tag: str = "v1.4.0",
-    target_sha: str,
-    specs: list[str] | None = None,
-    repo: str = REPO,
-    notes: str = "SPEC-1 CSV export of orders, asked by Acme (m-ask-1).",
+    period: str = PERIOD,
+    goals: str = "GOALS-1",
+    cap_cents: int | None = None,
+    lines: list[dict[str, Any]] | None = None,
+    justification: str = "the departments' shares of the approved cap",
+    digest: bool = True,
+    rule: str | None = None,
 ) -> Proposal:
-    return Proposal(
-        schema=PROPOSAL_SCHEMA,
-        kind="release",
-        platform="github",
-        action="create_release",
-        target=f"{repo}@{tag}",
-        snapshot_hint=target_sha,
-        body={
-            "tag": tag,
-            "target_sha": target_sha,
-            "notes": notes,
-            "specs": specs or ["SPEC-1"],
-            "asks": ["m-ask-1"],
-        },
-        ask="m-ask-1",
-        rule="release",
-        justification="release manager asked for the Friday release",
+    if lines is None:
+        cap = (
+            cap_cents
+            if cap_cents is not None
+            else plan_goals(books, period, BASIS)["cost_cap_cents"]
+        )
+        lines = standard_budget_lines(cap)
+    return build_budget(
+        POLICY,
+        period=period,
+        goals=goals,
+        lines=lines,
+        digest=books.actuals_digest(BASIS) if digest else "",
+        justification=justification,
+        rule=rule,
     )
 
 
-def review_fence(
+def entries_proposal(
+    books: Ledger,
     *,
-    pr: str = "PR-41",
-    head_sha: str,
-    met: list[bool] | None = None,
-    evidence: str = "tests/test_export.py",
-) -> str:
-    met = met if met is not None else [True, True, True, True]
-    r = Review(
-        schema=REVIEW_SCHEMA,
-        pr=pr,
-        head_sha=head_sha,
-        results=[
-            {"criterion": i + 1, "met": m, "evidence": f"{evidence}::test_{i + 1}"}
-            for i, m in enumerate(met)
-        ],
-        summary=f"{sum(met)} of {len(met)} met",
+    period: str = PERIOD,
+    goals: str = "GOALS-1",
+    budget: str = "BUDGET-1",
+    memo: str = "Budget November 2026",
+    justification: str = "the budget is recorded; lines from the ledger",
+    lines: list[dict[str, Any]] | None = None,
+    digest: bool = True,
+    rule: str | None = None,
+) -> Proposal:
+    rows = books.budget(period)
+    if lines is None:
+        lines = [
+            {
+                "department": r["department"],
+                "account": r["account"],
+                "amount_cents": int(r["amount_cents"]),
+            }
+            for r in rows
+        ] or standard_budget_lines(plan_goals(books, period, BASIS)["cost_cap_cents"])
+    return build_entries(
+        POLICY,
+        period=period,
+        goals=goals,
+        budget=budget,
+        lines=lines,
+        memo=memo,
+        digest=Ledger.budget_digest(rows) if digest else "",
+        justification=justification,
+        rule=rule,
     )
-    return f"@{GITHUB_EXECUTOR} review\n{r.render()}"
 
 
 def proposal_text(p: Proposal) -> str:
-    executor = SWITCH_EXECUTOR if p.kind == "spec" else GITHUB_EXECUTOR
-    return f"@{executor} proposal\n{p.render()}"
+    return render(p)
 
 
-# -- the harness -------------------------------------------------------------------------------
+# -- the harness --------------------------------------------------------------------------------
 
 
 @dataclass
 class Harness:
     switch: Effector
-    github: Effector
-    gh: FakeGitHub
+    ledger: Effector
+    books: Ledger
     rooms: FakeSwitchRooms
     clock: FrozenClock
     posts: list[core.Post] = field(default_factory=list)
@@ -238,7 +211,7 @@ class Harness:
 
     @property
     def executors(self) -> dict[str, Effector]:
-        return {SWITCH_EXECUTOR: self.switch, GITHUB_EXECUTOR: self.github}
+        return {SWITCH_EXECUTOR: self.switch, LEDGER_EXECUTOR: self.ledger}
 
     # -- event builders (real frame shape) --------------------------------------------------
 
@@ -264,7 +237,7 @@ class Harness:
             addressed=addressed,
             thread_id=thread,
             timestamp=int(self.clock.now.timestamp() * 1000),
-            channel_type="channel_public" if room in (PRODUCT, RELEASES) else "channel_private",
+            channel_type="channel_public" if room == FINANCE else "channel_private",
         )
         ev = parse_frame(frame)
         assert isinstance(ev, MessageEvent)
@@ -283,7 +256,7 @@ class Harness:
         label: str | None = None,
         to: tuple[str, ...] | None = None,
     ) -> list[core.Effect]:
-        """Deliver one message to every executor that is a member of the room."""
+        """Deliver one message to every executor that is a member of the room (or to `to`)."""
         name = name if name is not None else NAMES.get(sender, sender)
         ev = self._event(room, sender, name, body, mid=mid, thread=thread, addressed=addressed)
         effects: list[core.Effect] = []
@@ -301,147 +274,126 @@ class Harness:
         *,
         sender: str,
         room: str,
-        executor: str = GITHUB_EXECUTOR,
+        executor: str = LEDGER_EXECUTOR,
         thread: str | None = None,
     ) -> list[core.Effect]:
-        return self.say(room, sender, f"@{executor} {body}", mid=mid, thread=thread)
+        return self.say(room, sender, f"@{executor} {body}", mid=mid, thread=thread, to=(executor,))
 
-    def propose_spec(self, mid: str = "m-spec-1", **kw: Any) -> list[core.Effect]:
-        return self.say(PRODUCT, PRODUCT_AGENT, proposal_text(spec_proposal(**kw)), mid=mid)
+    # -- the three gates --------------------------------------------------------------------
 
-    def approve_spec(
-        self, mid: str = "m-ok-spec", spec: str = "SPEC-1", sender: str = LEONARDO
+    def propose_goals(self, mid: str = "m-goals-1", **kw: Any) -> list[core.Effect]:
+        text = proposal_text(goals_proposal(self.books, **kw))
+        return self.say(FINANCE, PLANNER_AGENT, text, mid=mid, thread=kw.get("ask", ASK))
+
+    def approve_goals(
+        self, mid: str = "m-approve-goals", *, sender: str = JOHN, aid: str = "GOALS-1"
     ) -> list[core.Effect]:
         return self.command(
-            mid,
-            f"approve {spec}",
-            sender=sender,
-            room=PRODUCT,
-            executor=SWITCH_EXECUTOR,
-            thread="m-spec-1",
+            mid, f"approve {aid}", sender=sender, room=FINANCE, executor=SWITCH_EXECUTOR, thread=ASK
         )
 
-    def open_pull(self, number: int = 41, **over: Any):
-        return self.gh.add_pull(
-            number, **{"title": "CSV export of orders", "author_login": "coder-bot", **over}
-        )
-
-    def propose_pr(
-        self,
-        mid: str = "m-pr-1",
-        *,
-        number: int = 41,
-        room: str = FEATURE,
-        sender: str = CODER_AGENT,
-        **kw: Any,
-    ):
-        pr = self.gh.pulls.get(number)
-        head = pr.head_sha if pr else ""
+    def propose_budget(
+        self, mid: str = "m-budget-1", *, room: str = PLANNING, thread: str | None = None, **kw: Any
+    ) -> list[core.Effect]:
         return self.say(
             room,
-            sender,
-            proposal_text(pr_proposal(number=number, head_sha=kw.pop("head_sha", head), **kw)),
+            PLANNER_AGENT,
+            proposal_text(budget_proposal(self.books, **kw)),
             mid=mid,
+            thread=thread,
         )
 
-    def review(
+    def approve_budget(
         self,
-        mid: str = "m-rev-1",
+        mid: str = "m-approve-budget",
         *,
-        met: list[bool] | None = None,
-        number: int = 41,
-        sender: str = REVIEWER_AGENT,
-        room: str = FEATURE,
-    ):
-        head = self.gh.pulls[number].head_sha
+        sender: str = ISAAC,
+        aid: str = "BUDGET-1",
+        room: str = PLANNING,
+        thread: str | None = "m-budget-1",
+    ) -> list[core.Effect]:
+        return self.command(mid, f"approve {aid}", sender=sender, room=room, thread=thread)
+
+    def propose_entries(
+        self, mid: str = "m-entries-1", *, room: str = PERIOD_ROOM, **kw: Any
+    ) -> list[core.Effect]:
         return self.say(
-            room,
-            sender,
-            review_fence(pr=f"PR-{number}", head_sha=head, met=met),
-            mid=mid,
-            thread="m-pr-1",
+            room, BOOKKEEPER_AGENT, proposal_text(entries_proposal(self.books, **kw)), mid=mid
         )
 
-    def approve_pr(
-        self, mid: str = "m-ok-pr", pr: str = "PR-41", *, sender: str = ISAAC, room: str = FEATURE
-    ):
-        return self.command(mid, f"approve {pr}", sender=sender, room=room, thread="m-pr-1")
-
-    def propose_release(
+    def approve_entries(
         self,
-        mid: str = "m-rel-1",
+        mid: str = "m-approve-entries",
         *,
-        target_sha: str | None = None,
-        sender: str = RELEASE_AGENT,
-        room: str = RELEASES,
-        **kw: Any,
-    ):
-        sha = target_sha or self.gh.default_branch_head
-        return self.say(
-            room, sender, proposal_text(release_proposal(target_sha=sha, **kw)), mid=mid
-        )
-
-    def approve_release(
-        self, mid: str = "m-ok-rel", rel: str = "REL-1", *, sender: str = JOHN, room: str = RELEASES
-    ):
-        return self.command(mid, f"approve {rel}", sender=sender, room=room, thread="m-rel-1")
+        sender: str = LEONARDO,
+        aid: str = "ENTRIES-1",
+        room: str = PERIOD_ROOM,
+        thread: str | None = "m-entries-1",
+    ) -> list[core.Effect]:
+        return self.command(mid, f"approve {aid}", sender=sender, room=room, thread=thread)
 
     def sweep(self, label: str = "sweep") -> list[core.Effect]:
-        effects = self.switch.sweep() + self.github.sweep()
-        self.log.append((f"{label} at {self.clock.now:%H:%M:%S}", effects))
+        effects = self.switch.sweep() + self.ledger.sweep()
+        self.log.append((label, effects))
         return effects
 
-    # -- the full happy path, for tests that start later in the chain ------------------------
-
-    def run_spec_gate(self) -> Artifact:
-        self.propose_spec()
-        self.approve_spec()
-        a = self.switch.store.get("SPEC-1")
+    def run_goals_gate(self) -> Artifact:
+        self.propose_goals()
+        self.approve_goals()
+        self.sweep("sweep: stage lines")
+        a = self.goals()
         assert a is not None and a.state.value == "open", a
         return a
 
-    def run_merge_gate(self, *, review: bool = True) -> Artifact:
-        self.open_pull(41)
-        self.propose_pr()
-        if review:
-            self.review()
-        self.approve_pr()
-        a = self.github.store.get("PR-41")
-        assert a is not None and a.state.value == "merged", a
+    def run_budget_gate(self, *, sender: str = ISAAC) -> Artifact:
+        self.propose_budget()
+        self.approve_budget(sender=sender)
+        self.sweep("sweep: stage lines")
+        a = self.budget()
+        assert a is not None, "no BUDGET-1"
         return a
 
-    # -- queries -------------------------------------------------------------------------------
+    def run_entries_gate(self) -> Artifact:
+        self.propose_entries()
+        self.approve_entries()
+        self.sweep("sweep: goals done")
+        a = self.entries()
+        assert a is not None, "no ENTRIES-1"
+        return a
 
-    def audit_events(self, executor: str = GITHUB_EXECUTOR) -> list[str]:
+    # -- reads --------------------------------------------------------------------------------
+
+    def audit_events(self, executor: str = LEDGER_EXECUTOR) -> list[str]:
         return [e.event for e in self.executors[executor].store.audit_all()]
 
     def all_audit(self) -> list[tuple[str, Any]]:
-        out = []
+        rows = []
         for handle, ef in self.executors.items():
-            out += [(handle, e) for e in ef.store.audit_all()]
-        return sorted(out, key=lambda x: (x[1].ts, x[1].id or 0))
+            rows += [(handle, e) for e in ef.store.audit_all()]
+        return sorted(rows, key=lambda r: (r[1].ts, r[1].id or 0))
 
     def posts_to(self, room: str, *, fences: bool = False) -> list[core.Post]:
         return [
             p for p in self.posts if p.room_id == room and (fences or not is_status_fence(p.text))
         ]
 
-    def spec(self, aid: str = "SPEC-1") -> Artifact | None:
+    def goals(self, aid: str = "GOALS-1") -> Artifact | None:
         return self.switch.store.get(aid)
 
-    def pr(self, aid: str = "PR-41") -> Artifact | None:
-        return self.github.store.get(aid)
+    def budget(self, aid: str = "BUDGET-1") -> Artifact | None:
+        return self.ledger.store.get(aid)
 
-    def rel(self, aid: str = "REL-1") -> Artifact | None:
-        return self.github.store.get(aid)
+    def entries(self, aid: str = "ENTRIES-1") -> Artifact | None:
+        return self.ledger.store.get(aid)
+
+    def recorded(self) -> list[str]:
+        return [r["department"] for r in self.books.budget(PERIOD)]
+
+    def planned(self) -> list[str]:
+        return [r["department"] for r in self.books.planned(PERIOD)]
 
     def assert_no_leaks(self) -> None:
-        """No token anywhere; no participant id in a room post beyond whoami."""
-        for _, e in self.all_audit():
-            text = canonical_json(e.model_dump(mode="json"))
-            assert FAKE_TOKEN not in text and "GITHUB_TOKEN" not in text, "token leaked into audit"
         for p in self.posts:
-            assert FAKE_TOKEN not in p.text and "ghp_" not in p.text, "token leaked into a post"
             if "participant id" not in p.text:
                 assert "@switch-user-" not in p.text, f"participant id in a post: {p.text[:80]}"
 
@@ -454,11 +406,11 @@ def harness(tmp_path: Path) -> Harness:
     def poster(room_id: str, text: str, thread_id: str | None) -> None:
         posts.append(core.Post(room_id, text, thread_id))
 
-    gh = FakeGitHub(repo=REPO)
+    books = Ledger(tmp_path / "books.db")
+    books.import_dir(DATA / BASIS)
     rooms = FakeSwitchRooms()
-    github_db = tmp_path / "github.db"
-    github_store = Store(github_db)
-    switch_store = Store(":memory:")
+    switch_db, ledger_db = tmp_path / "switch.db", tmp_path / "ledger.db"
+    switch_store, ledger_store = Store(switch_db), Store(ledger_db)
     common = dict(
         policy_path=FIXTURES / "policy.yaml",
         users_path=FIXTURES / "users.yaml",
@@ -472,30 +424,38 @@ def harness(tmp_path: Path) -> Harness:
         RunnerConfig(
             executor=SWITCH_EXECUTOR,
             self_id=SWITCH_EXEC,
-            peer_ids=frozenset({GITHUB_EXEC}),
-            peer_state_db=github_db,
+            peer_ids=frozenset({LEDGER_EXEC}),
+            peer_state_db=ledger_db,
             **common,
         ),
         clock=clock,
     )
-    github = Effector(
-        github_store,
-        {"github": gh},
+    ledger = Effector(
+        ledger_store,
+        {"ledger": LedgerAdapter(books)},
         poster,
         RunnerConfig(
-            executor=GITHUB_EXECUTOR,
-            self_id=GITHUB_EXEC,
+            executor=LEDGER_EXECUTOR,
+            self_id=LEDGER_EXEC,
             peer_ids=frozenset({SWITCH_EXEC}),
+            peer_state_db=switch_db,
             **common,
         ),
         clock=clock,
     )
     h = Harness(
-        switch=switch, github=github, gh=gh, rooms=rooms, clock=clock, posts=posts, tmp=tmp_path
+        switch=switch,
+        ledger=ledger,
+        books=books,
+        rooms=rooms,
+        clock=clock,
+        posts=posts,
+        tmp=tmp_path,
     )
     yield h
     switch_store.close()
-    github_store.close()
+    ledger_store.close()
+    books.close()
 
 
 @pytest.fixture
@@ -508,7 +468,7 @@ def temp_policy(tmp_path: Path, harness: Harness):
         path = tmp_path / "policy.yaml"
         path.write_text(yaml.safe_dump(data))
         shutil.copy(FIXTURES / "users.yaml", tmp_path / "users.yaml")
-        for ef in (harness.switch, harness.github):
+        for ef in (harness.switch, harness.ledger):
             ef.config.policy_path = path
             ef.config.users_path = tmp_path / "users.yaml"
         return path
@@ -536,8 +496,6 @@ def _fmt_effect(e: core.Effect) -> str:
             return f"new snapshot for {aid} ({sha[:12]}…)"
         case core.RecordApproval(artifact_id=aid, decision=d):
             return f"record {d} on {aid}"
-        case core.RecordReview(artifact_id=aid, review=r):
-            return f"record review {aid}: {r.met} of {r.total}"
         case core.Execute(artifact_id=aid):
             return f"adapter.execute {aid}"
         case core.Verify(artifact_id=aid):
@@ -554,7 +512,9 @@ def write_report(
     lines = [
         f"# {title}",
         "",
-        f"_Generated by `uv run pytest validation/{name}.py` against `executor.core` through both executors on `FakeGitHub` and `FakeSwitchRooms`, a frozen clock starting {T0:%Y-%m-%d %H:%M:%S} UTC, and synthetic events in the real frame shape (DDD §12.1, §15.3)._",
+        f"_Generated by `uv run pytest validation/{name}.py` against `executor.core` through both "
+        f"executors on a real ledger file and `FakeSwitchRooms`, a frozen clock starting "
+        f"{T0:%Y-%m-%d %H:%M:%S} UTC, and synthetic events in the real frame shape._",
         "",
         "## Scenario",
         "",
@@ -573,11 +533,24 @@ def write_report(
         for e in effects:
             lines.append(f"- {_fmt_effect(e)}")
         lines.append("")
-    lines += ["## Adapter calls", ""]
-    calls = [f"- github `{op}` {t}" for op, t in harness.gh.calls] + [
-        f"- switch `{op}` {t}" for op, t in harness.rooms.calls
-    ]
-    lines += calls or ["- none"]
+    lines += ["## The ledger afterwards", ""]
+    t = harness.books.targets(PERIOD)
+    if t:
+        lines.append(
+            f"- targets {PERIOD}: revenue {t['revenue_cents'] / 100:,.2f}, cap "
+            f"{t['cost_cap_cents'] / 100:,.2f} ({t['source']})"
+        )
+    for r in harness.books.budget(PERIOD):
+        lines.append(
+            f"- budget {r['department']} {r['account']} {r['amount_cents'] / 100:,.2f} ({r['source']})"
+        )
+    for r in harness.books.planned(PERIOD):
+        lines.append(
+            f"- planned {r['department']} {r['account']} {r['amount_cents'] / 100:,.2f} ({r['source']})"
+        )
+    lines.append(f"- period {PERIOD}: {harness.books.period_status(PERIOD)}")
+    lines += ["", "## Gateway calls", ""]
+    lines += [f"- switch `{op}` {t}" for op, t in harness.rooms.calls] or ["- none"]
     lines += [
         "",
         "## Audit rows",
@@ -595,4 +568,4 @@ def write_report(
     return path
 
 
-__all__ = ["fake_sha"]
+__all__ = ["canonical_json"]

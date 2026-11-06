@@ -1,4 +1,4 @@
-"""DDD §8: proposal v2 per kind, review v1, snapshot hashing, fences, artifacts."""
+"""Proposal v3 bodies, the snapshot hash, states and the status fence (design v5 §5)."""
 
 from __future__ import annotations
 
@@ -7,15 +7,21 @@ from datetime import UTC, datetime
 
 import pytest
 from pydantic import ValidationError
-from validation.harness import ISAAC, REPO, pr_proposal, release_proposal, spec_proposal
+from validation.harness import (
+    BASIS,
+    DATA,
+    PERIOD,
+    budget_proposal,
+    entries_proposal,
+    goals_proposal,
+)
 
+from sindarin.ledger import Ledger
 from sindarin.schema import (
     PROPOSAL_FENCE,
-    REVIEW_SCHEMA,
     Artifact,
     Kind,
     Proposal,
-    Review,
     Snapshot,
     State,
     StatusFence,
@@ -23,175 +29,115 @@ from sindarin.schema import (
     extract_fences,
     kind_of_id,
     make_snapshot,
+    money,
+    percent,
+    previous_period,
     render_fence,
-    sha256_hex,
 )
 
 
-def test_canonical_json_is_stable_under_key_order():
-    a = {"b": 1, "a": {"y": 2, "x": 1}}
-    b = {"a": {"x": 1, "y": 2}, "b": 1}
-    assert canonical_json(a) == canonical_json(b) == '{"a":{"x":1,"y":2},"b":1}'
-    assert canonical_json({"k": "é"}) == '{"k":"é"}'
+@pytest.fixture
+def books(tmp_path):
+    ledger = Ledger(tmp_path / "books.db")
+    ledger.import_dir(DATA / BASIS)
+    yield ledger
+    ledger.close()
 
 
-def test_kind_of_id():
-    assert kind_of_id("SPEC-3") is Kind.SPEC and kind_of_id("PR-41") is Kind.PR
-    assert kind_of_id("REL-1") is Kind.RELEASE and kind_of_id("REQ-1") is None
+def test_kinds_ids_money_and_periods():
+    assert kind_of_id("GOALS-1") is Kind.GOALS and kind_of_id("BUDGET-7") is Kind.BUDGET
+    assert kind_of_id("ENTRIES-2") is Kind.ENTRIES and kind_of_id("PR-41") is None
+    assert money(1600000) == "16,000.00 USD" and money(-5, "EUR") == "-0.05 EUR"
+    assert percent(8316) == "83.2%" and previous_period("2026-01") == "2025-12"
+    assert previous_period("2026-11") == "2026-10"
 
 
-def test_spec_proposal_round_trip_and_canonical():
-    p = spec_proposal()
-    again = Proposal.model_validate(json.loads(p.canonical()))
-    assert again == p and again.canonical() == p.canonical()
-    assert p.repo == REPO and p.kind is Kind.SPEC
-    shuffled = dict(reversed(list(p.to_dict().items())))
-    assert Proposal.model_validate(shuffled).canonical() == p.canonical()
+def test_proposals_round_trip_and_fit_their_kind(books):
+    goals = goals_proposal(books)
+    assert goals.kind is Kind.GOALS and goals.target == f"plan-{PERIOD}"
+    assert not goals.snapshot_hint and goals.body.basis == BASIS
+    assert goals.body.revenue_target_cents == 9500000 and goals.body.cost_cap_cents == 1600000
+    assert goals.body.margin_target_bps == 8316
+    budget = budget_proposal(books)
+    assert budget.kind is Kind.BUDGET and budget.target == f"budget:{PERIOD}"
+    assert budget.body.total_cents == 1600000 and len(budget.snapshot_hint) == 64
+    assert [x.department for x in budget.body.lines] == [
+        "engineering",
+        "sales",
+        "marketing",
+        "general-admin",
+    ]
+    entries = entries_proposal(books)
+    assert entries.kind is Kind.ENTRIES and entries.target == f"period:{PERIOD}"
+    assert entries.body.budget == "BUDGET-1" and entries.body.total_cents == 1600000
+    for p in (goals, budget, entries):
+        again = Proposal.model_validate_json(p.model_dump_json(by_alias=True))
+        assert again == p and extract_fences(p.render(), PROPOSAL_FENCE)[0] == p.canonical()
 
 
-def test_pr_and_release_targets_carry_repo():
-    pr = pr_proposal(number=41)
-    assert pr.repo == REPO and pr.target == f"{REPO}#41"
-    rel = release_proposal(target_sha="a" * 40)
-    assert rel.repo == REPO and rel.target == f"{REPO}@v1.4.0"
-
-
-@pytest.mark.parametrize(
-    "mutate,fragment",
-    [
-        (lambda d: d.update(platform="github"), "platform switch"),
-        (lambda d: d.update(action="merge_pr"), "takes action open_feature_room"),
-        (lambda d: d.update(target="Feat Room"), "room slug"),
-        (lambda d: d.update(snapshot_hint="a" * 40), "no snapshot_hint"),
-        (lambda d: d["body"].update(faq=["one", "two"]), "faq"),
-        (lambda d: d["body"].update(criteria=["a", "b"]), "criteria"),
-        (lambda d: d["body"].update(target_date="soon"), "target_date"),
-        (lambda d: d["body"].update(repo="not a repo"), "repo"),
-        (lambda d: d["body"].update(extra=1), "extra"),
-        (lambda d: d.update(approved=True), "approved"),
-        (lambda d: d.update(schema="sindarin/proposal/v1"), "schema"),
-        (lambda d: d.update(justification="x" * 281), "justification"),
-    ],
-)
-def test_spec_proposal_rejections(mutate, fragment):
-    data = spec_proposal().to_dict()
-    mutate(data)
-    with pytest.raises(ValidationError) as exc:
-        Proposal.model_validate(data)
-    assert fragment in str(exc.value)
-
-
-@pytest.mark.parametrize(
-    "mutate,fragment",
-    [
-        (lambda d: d.update(target=f"{REPO}#42"), "differs from body.number"),
-        (lambda d: d.update(target=REPO), "owner/repo#number"),
-        (lambda d: d.update(snapshot_hint="abc"), "40-hex"),
-        (lambda d: d["body"].update(number="41"), "number"),
-        (lambda d: d["body"].update(spec="PR-1"), "spec"),
-        (lambda d: d.update(body=spec_proposal().to_dict()["body"]), "required"),
-    ],
-)
-def test_pr_proposal_rejections(mutate, fragment):
-    data = pr_proposal().to_dict()
-    mutate(data)
-    with pytest.raises(ValidationError) as exc:
-        Proposal.model_validate(data)
-    assert fragment in str(exc.value)
-
-
-@pytest.mark.parametrize(
-    "mutate,fragment",
-    [
-        (lambda d: d.update(target=f"{REPO}@v9"), "differs from body.tag"),
-        (lambda d: d["body"].update(target_sha="short"), "target_sha"),
-        (lambda d: d["body"].update(specs=[]), "specs"),
-        (lambda d: d["body"].update(specs=["PR-41"]), "bad spec id"),
-        (lambda d: d["body"].update(notes="n" * 2001), "notes"),
-    ],
-)
-def test_release_proposal_rejections(mutate, fragment):
-    data = release_proposal(target_sha="b" * 40).to_dict()
-    mutate(data)
-    with pytest.raises(ValidationError) as exc:
-        Proposal.model_validate(data)
-    assert fragment in str(exc.value)
-
-
-def test_review_counts_and_rejects_extras():
-    r = Review(
-        schema=REVIEW_SCHEMA,
-        pr="PR-41",
-        head_sha="a" * 40,
-        results=[
-            {"criterion": 1, "met": True, "evidence": "t1"},
-            {"criterion": 2, "met": False, "evidence": "missing"},
-        ],
-        summary="1 of 2 met",
-    )
-    assert (r.met, r.total) == (1, 2)
-    assert r.render().startswith("```sindarin-review\n")
+def test_proposals_refuse_what_the_executor_must_never_see(books):
+    data = json.loads(goals_proposal(books).canonical())
+    data["extra"] = 1
     with pytest.raises(ValidationError):
-        Review.model_validate({**r.to_dict(), "approved": True})
-    with pytest.raises(ValidationError):
-        Review.model_validate({**r.to_dict(), "pr": "SPEC-1"})
+        Proposal.model_validate(data)
+    data = json.loads(budget_proposal(books).canonical())
+    data["body"]["total_cents"] += 1  # the fence's total must be the sum of its lines
+    with pytest.raises(ValidationError, match="not the sum of the lines"):
+        Proposal.model_validate(data)
+    data = json.loads(budget_proposal(books).canonical())
+    data["target"] = "budget:2026-12"  # target and period disagree
+    with pytest.raises(ValidationError, match="budget target"):
+        Proposal.model_validate(data)
+    data = json.loads(budget_proposal(books).canonical())
+    data["body"]["lines"].append(dict(data["body"]["lines"][0]))  # a department twice
+    with pytest.raises(ValidationError, match="repeat"):
+        Proposal.model_validate(data)
+    data = json.loads(goals_proposal(books).canonical())
+    data["snapshot_hint"] = "a" * 64  # goals bind to policy, not to a ledger read
+    with pytest.raises(ValidationError, match="no snapshot_hint"):
+        Proposal.model_validate(data)
+    data = json.loads(goals_proposal(books).canonical())
+    data["body"]["basis"] = "2026-12"  # the basis comes before the period
+    with pytest.raises(ValidationError, match="basis period comes before"):
+        Proposal.model_validate(data)
+    data = json.loads(entries_proposal(books).canonical())
+    data["platform"] = "switch"
+    with pytest.raises(ValidationError, match="platform"):
+        Proposal.model_validate(data)
 
 
-def test_snapshot_hash_binds_proposal_and_facts():
-    p = pr_proposal()
-    s1 = make_snapshot("PR-41", "@a:t", p, {"head_sha": "a" * 40, "base": "main"})
-    s2 = make_snapshot("PR-41", "@a:t", p, {"head_sha": "b" * 40, "base": "main"})
-    s3 = make_snapshot("PR-41", "@b:t", p, {"head_sha": "a" * 40, "base": "main"})
-    s4 = make_snapshot(
-        "PR-41", "@a:t", pr_proposal(title="other"), {"head_sha": "a" * 40, "base": "main"}
-    )
-    assert len({s1.hash, s2.hash, s3.hash, s4.hash}) == 4
-    assert s1.hash == sha256_hex(s1.canonical())
-    assert Snapshot.model_validate_json(s1.canonical()) == s1
-    with pytest.raises(ValidationError):
-        Snapshot.model_validate({**s1.to_dict(), "approved": True})
+def test_snapshot_hash_binds_proposal_and_facts(books):
+    p = budget_proposal(books)
+    facts = {"total_cents": 1600000, "digest": "d" * 64}
+    s1 = make_snapshot("BUDGET-1", "@switch-agent-planner:test", p, facts)
+    s2 = make_snapshot("BUDGET-1", "@switch-agent-planner:test", p, {**facts, "total_cents": 1})
+    assert s1.hash != s2.hash and len(s1.hash) == 64
+    assert Snapshot.model_validate_json(s1.canonical()).hash == s1.hash
+    assert canonical_json({"b": 1, "a": [2, 3]}) == '{"a":[2,3],"b":1}'
 
 
-def test_fences():
-    text = "hello\n" + render_fence(PROPOSAL_FENCE, {"a": 1}) + "\nbye"
-    assert extract_fences(text, PROPOSAL_FENCE) == ['{"a":1}']
-    assert extract_fences(text, "sindarin-review") == []
-    assert extract_fences(
-        "```sindarin-proposal\n{}\n```\n```sindarin-proposal\n{}\n```", PROPOSAL_FENCE
-    ) == ["{}", "{}"]
-
-
-def _artifact(**over) -> Artifact:
+def test_states_and_status_fence(books):
+    assert State.RECORDED.value == "recorded" and State.PLANNED.value == "planned"
+    p = budget_proposal(books)
+    snap = make_snapshot("BUDGET-1", "@p:t", p, {})
     now = datetime(2026, 11, 5, 12, 0, tzinfo=UTC)
-    p = pr_proposal()
-    snap = make_snapshot("PR-41", "@c:t", p, {"head_sha": "a" * 40})
-    base = dict(
-        id="PR-41",
-        kind=Kind.PR,
-        rule="merge",
+    a = Artifact(
+        id="BUDGET-1",
+        kind=Kind.BUDGET,
+        rule="budget",
         room_id="!r:t",
-        thread_id="m1",
-        proposal_message_id="m1",
-        proposer_id="@c:t",
-        proposer_name="coder",
+        thread_id="m",
+        proposal_message_id="m",
+        proposer_id="@p:t",
+        proposer_name="planner",
         proposal_json=p.model_dump_json(by_alias=True),
         snapshot_json=snap.canonical(),
         snapshot_sha=snap.hash,
         created_at=now,
         expires_at=now,
     )
-    base.update(over)
-    return Artifact.model_validate(base)
-
-
-def test_artifact_accessors_and_status_fence():
-    a = _artifact()
-    assert a.proposal().body.number == 41 and a.facts()["head_sha"] == "a" * 40
-    assert a.target == f"{REPO}#41" and a.result() == {}
-    f = StatusFence.from_artifact(a, datetime(2026, 11, 5, 12, 0, tzinfo=UTC), State.MERGED)
-    assert f.state == "merged" and f.id == "PR-41" and "@switch" not in f.render()
-    with pytest.raises(ValidationError):
-        _artifact(id="REQ-1")
-    with pytest.raises(ValidationError):
-        Artifact.model_validate({**_artifact().model_dump(), "token": "x"})
-    assert ISAAC.startswith("@switch-user-")
+    assert a.period == PERIOD and a.target == f"budget:{PERIOD}" and a.facts() == {}
+    fence = StatusFence.from_artifact(a, now, State.RECORDED)
+    text = fence.render()
+    assert text.startswith("```sindarin-status") and '"state":"recorded"' in text
+    assert "@p:t" not in text and render_fence("x", {"a": 1}) == '```x\n{"a":1}\n```'

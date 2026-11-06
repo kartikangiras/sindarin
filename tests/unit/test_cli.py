@@ -1,224 +1,103 @@
-"""CLI contract (DDD §6, §16.1): `sindarin propose` prints the exact block or one line + exit 1;
-audit and board read the state files; help works for every app."""
+"""CLI contract (design v5 §5): the ledger commands, the audit view, the executor and agent
+entry points refuse unknown names in one line."""
 
 from __future__ import annotations
 
-import json
 from datetime import UTC, datetime
 
-import pytest
 from typer.testing import CliRunner
-from validation.harness import FIXTURES, ISAAC, REPO
+from validation.harness import DATA
 
 from sindarin.cli import agent_app, app, exec_app
+from sindarin.executor.config import ExecutorConfig, save_config
+from sindarin.names import LEDGER_EXECUTOR, SWITCH_EXECUTOR
+from sindarin.schema import AuditEntry
+from sindarin.store import Store
 
 runner = CliRunner()
 
-SPEC = [
-    "propose",
-    "spec",
-    "--title",
-    "CSV export of orders",
-    "--press-release",
-    "Acme can export orders as CSV.",
-    "--faq",
-    "a",
-    "--faq",
-    "b",
-    "--faq",
-    "c",
-    "--criteria",
-    "1",
-    "--criteria",
-    "2",
-    "--criteria",
-    "3",
-    "--target-date",
-    "2026-11-07",
-    "--engineer",
-    ISAAC,
-    "--repo",
-    REPO,
-    "--slug",
-    "feat-csv-export",
-    "--ask",
-    "m-ask-1",
-    "--justification",
-    "Acme asked",
-]
 
-
-@pytest.fixture(autouse=True)
-def _policy_env(monkeypatch):
-    monkeypatch.setenv("SINDARIN_POLICY_PATH", str(FIXTURES / "policy.yaml"))
-
-
-def test_propose_spec_prints_exact_block():
-    result = runner.invoke(app, SPEC)
-    assert result.exit_code == 0, result.output
-    lines = result.output.rstrip("\n").split("\n")
-    assert (
-        lines[0] == "@sindarin-switch proposal"
-        and lines[1] == "```sindarin-proposal"
-        and lines[3] == "```"
-    )
-    body = json.loads(lines[2])
-    assert (
-        body["kind"] == "spec" and body["target"] == "feat-csv-export" and body["ask"] == "m-ask-1"
-    )
-    assert lines[2] == json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-
-
-@pytest.mark.parametrize(
-    "override,fragment",
-    [
-        (("--repo", "acme/other"), "not allowed by rule spec"),
-        (("--engineer", "@switch-user-vincent:test"), "not in group engineering"),
-        (("--target-date", "soon"), "target_date"),
-        (("--slug", "Feat Room"), "room slug"),
-    ],
-)
-def test_propose_spec_rejections_are_one_line_exit_1(override, fragment):
-    args = list(SPEC)
-    args[args.index(override[0]) + 1] = override[1]
-    result = runner.invoke(app, args)
-    assert result.exit_code == 1
-    err = (result.stderr or result.output).strip()
-    assert fragment in err and "\n" not in err
-
-
-def test_propose_pr_and_release():
-    result = runner.invoke(
-        app,
-        [
-            "propose",
-            "pr",
-            "--number",
-            "41",
-            "--title",
-            "t",
-            "--branch",
-            "feat/SPEC-1",
-            "--spec",
-            "SPEC-1",
-            "--repo",
-            REPO,
-            "--head-sha",
-            "a" * 40,
-            "--justification",
-            "ok",
-        ],
-    )
-    assert result.exit_code == 0, result.output
-    assert result.output.startswith("@sindarin-github proposal\n")
-    assert json.loads(result.output.split("\n")[2])["target"] == f"{REPO}#41"
-    result = runner.invoke(
-        app,
-        [
-            "propose",
-            "release",
-            "--tag",
-            "v1.4.0",
-            "--target-sha",
-            "b" * 40,
-            "--notes",
-            "n",
-            "--spec",
-            "SPEC-1",
-            "--ask",
-            "m1",
-            "--repo",
-            REPO,
-            "--justification",
-            "go",
-        ],
-    )
-    assert result.exit_code == 0, result.output
-    assert json.loads(result.output.split("\n")[2])["body"]["tag"] == "v1.4.0"
-    result = runner.invoke(
-        app,
-        [
-            "propose",
-            "release",
-            "--tag",
-            "9",
-            "--target-sha",
-            "b" * 40,
-            "--notes",
-            "n",
-            "--spec",
-            "SPEC-1",
-            "--repo",
-            REPO,
-            "--justification",
-            "go",
-        ],
-    )
-    assert result.exit_code == 1 and "does not match" in (result.stderr or result.output)
-
-
-def test_propose_missing_policy(monkeypatch, tmp_path):
-    monkeypatch.setenv("SINDARIN_POLICY_PATH", str(tmp_path / "nope.yaml"))
-    result = runner.invoke(app, SPEC)
-    assert result.exit_code == 1 and "policy file not found" in (result.stderr or result.output)
-
-
-def test_help_and_version():
-    assert runner.invoke(app, ["--help"]).exit_code == 0
-    assert runner.invoke(exec_app, ["--help"]).exit_code == 0
-    assert runner.invoke(agent_app, ["--help"]).exit_code == 0
-    assert runner.invoke(exec_app, ["version"]).output.strip() == "0.1.0"
-    assert runner.invoke(exec_app, ["run", "--executor", "nope"]).exit_code == 1
-    assert runner.invoke(agent_app, ["run", "nope"]).exit_code == 1
-
-
-def test_audit_and_board(tmp_path):
-    from sindarin.executor.config import ExecutorConfig, save_config
-    from sindarin.names import GITHUB_EXECUTOR, SWITCH_EXECUTOR
-    from sindarin.schema import AuditEntry
-    from sindarin.store import Store
-
-    result = runner.invoke(app, ["audit", "--executor-dir", str(tmp_path)])
-    assert result.exit_code == 1
+def _exec_dir(tmp_path):
+    exec_dir = tmp_path / "executor"
+    exec_dir.mkdir()
     save_config(
-        tmp_path / "github.yaml",
+        exec_dir / "ledger.yaml",
         ExecutorConfig(
-            executor=GITHUB_EXECUTOR,
-            policy_path=str(FIXTURES / "policy.yaml"),
-            users_path=str(FIXTURES / "users.yaml"),
+            executor=LEDGER_EXECUTOR,
+            self_id="@switch-agent-l:test",
+            peer_state_db="switch.db",
+            data_dir=str(DATA),
         ),
     )
     save_config(
-        tmp_path / "switch.yaml",
+        exec_dir / "switch.yaml",
         ExecutorConfig(
-            executor=SWITCH_EXECUTOR,
-            peer_state_db="github.db",
-            policy_path=str(FIXTURES / "policy.yaml"),
-            users_path=str(FIXTURES / "users.yaml"),
+            executor=SWITCH_EXECUTOR, self_id="@switch-agent-s:test", peer_state_db="ledger.db"
         ),
     )
-    s = Store(tmp_path / "github.db")
+    return exec_dir
+
+
+def test_ledger_import_show_amend_reset(tmp_path):
+    exec_dir = _exec_dir(tmp_path)
+    r = runner.invoke(app, ["ledger", "import", "--executor-dir", str(exec_dir)])
+    assert r.exit_code == 0, r.output
+    assert "13 sales rows, 3 payables" in r.output and (exec_dir / "books.db").exists()
+    r = runner.invoke(app, ["ledger", "show", "2026-10", "--executor-dir", str(exec_dir)])
+    assert r.exit_code == 0 and "INV-1042 Amazon Web Services 4,800.00 USD open" in r.output
+    assert "revenue 89,905.00 USD" in r.output and "4000 Revenue" in r.output
+    assert "targets (import): revenue 85,000.00 USD" in r.output
+    r = runner.invoke(
+        app,
+        [
+            "ledger",
+            "add-sale",
+            "S-2026-1055",
+            "--amount",
+            "3980.00",
+            "--executor-dir",
+            str(exec_dir),
+        ],
+    )
+    assert (
+        r.exit_code == 0 and "S-2026-1055 Contoso Ltd 3,980.00 USD landed on 2026-10-28" in r.output
+    )
+    r = runner.invoke(
+        app, ["ledger", "amend", "INV-9", "--amount", "1", "--executor-dir", str(exec_dir)]
+    )
+    assert r.exit_code == 1 and "unknown payable INV-9" in r.output
+    r = runner.invoke(app, ["ledger", "reset", "--executor-dir", str(exec_dir)])
+    assert r.exit_code == 0 and "reloaded 2026-10" in r.output
+    r = runner.invoke(app, ["ledger", "show", "--executor-dir", str(exec_dir)])
+    assert "revenue 89,905.00 USD" in r.output
+
+
+def test_audit_table_and_filter(tmp_path):
+    exec_dir = _exec_dir(tmp_path)
+    s = Store(exec_dir / "ledger.db")
     s.append_audit(
         AuditEntry(
-            ts=datetime(2026, 11, 5, tzinfo=UTC),
-            artifact_id="PR-41",
+            ts=datetime(2026, 11, 5, 12, 0, tzinfo=UTC),
+            artifact_id="BUDGET-1",
             event="approved",
-            actor_name="Isaac",
+            actor_name="John",
             details={"snapshot_sha": "abc"},
         )
     )
     s.close()
-    Store(tmp_path / "switch.db").close()
-    result = runner.invoke(app, ["audit", "--md", "--executor-dir", str(tmp_path)])
-    assert (
-        result.exit_code == 0
-        and "| github | `approved` | PR-41 | Isaac | snapshot_sha=abc |" in result.output
+    result = runner.invoke(app, ["audit", "--executor-dir", str(exec_dir)])
+    assert result.exit_code == 0, result.output
+    assert "BUDGET-1" in result.output and "approved" in result.output and "John" in result.output
+    result = runner.invoke(
+        app, ["audit", "--executor-dir", str(exec_dir), "--artifact", "BUDGET-1"]
     )
-    result = runner.invoke(app, ["audit", "--executor-dir", str(tmp_path), "--artifact", "PR-41"])
-    assert "approved · PR-41 · by Isaac" in result.output
-    result = runner.invoke(app, ["board", "--executor-dir", str(tmp_path)])
-    assert (
-        result.exit_code == 0
-        and result.output.startswith("**Board**")
-        and "nothing in flight" in result.output
-    )
+    assert result.exit_code == 0 and "BUDGET-1" in result.output
+
+
+def test_exec_and_agent_refuse_unknown_names(tmp_path):
+    r = runner.invoke(exec_app, ["run", "--executor", "github", "--executor-dir", str(tmp_path)])
+    assert r.exit_code == 1 and "must be switch or ledger" in r.output
+    r = runner.invoke(agent_app, ["run", "coder", "--repo-root", str(tmp_path)])
+    assert r.exit_code == 1 and "unknown role" in r.output
+    r = runner.invoke(exec_app, ["version"])
+    assert r.exit_code == 0 and r.output.strip()

@@ -1,73 +1,36 @@
-"""Test 7 — Expiry (DDD §15.3, new).
+"""Test 7 — Goals pending past their TTL (design v5 §6, A4).
 
-A spec pending past its `pending_ttl` expires on the sweep: state `expired`, `product` told in
-the thread, no room opened. A late `approve` is refused as expired, and the same on a PR.
+GOALS-1 is pending with a 24h TTL. The clock moves 25 hours; the sweep expires it and tells the
+planner; a late approval is refused as expired; no plan room is opened.
 """
 
 from __future__ import annotations
 
 from sindarin.executor import core
-from validation.harness import PRODUCT, Harness, write_report
+from validation.harness import Harness, write_report
+
+
+def _posts(fx):
+    return [e for e in fx if isinstance(e, core.Post)]
 
 
 def test_expiry(harness: Harness):
     h = harness
-    h.propose_spec()
-    assert h.spec().state.value == "pending"
-
-    h.clock.advance(hours=23)
-    assert [e for e in h.sweep("sweep (23 h, not due)") if isinstance(e, core.Transition)] == []
-    assert h.spec().state.value == "pending"
-
-    h.clock.advance(hours=1, seconds=1)
-    fx = h.sweep("sweep (24 h, due)")
-    assert [e.state.value for e in fx if isinstance(e, core.Transition)] == ["expired"]
-    post = [e for e in fx if isinstance(e, core.Post)][0]
-    assert post.room_id == PRODUCT and post.thread_id == "m-spec-1"
-    assert (
-        post.text
-        == "**SPEC-1** expired after 24h without a decision. @product re-propose if still wanted."
-    )
-    assert h.spec().state.value == "expired"
-    assert h.rooms.count("execute") == 0, "no room opened"
-
-    fx = h.approve_spec("m-late")
-    post = [e for e in fx if isinstance(e, core.Post)][0]
-    assert post.text == "**SPEC-1** is expired, not pending."
-
-    # the product agent re-proposes: a new id, pending again
-    h.propose_spec("m-spec-2")
-    assert h.spec("SPEC-2").state.value == "pending"
-
-    # a PR left pending past its TTL is caught at approval time as well as by the sweep
-    h.approve_spec("m-ok-2", spec="SPEC-2")
-    h.open_pull(41)
-    h.propose_pr()
+    h.propose_goals()
+    assert h.goals().state.value == "pending"
     h.clock.advance(hours=25)
-    fx = h.approve_pr("m-late-pr")
-    texts = [e.text for e in fx if isinstance(e, core.Post)]
-    assert texts[0].startswith("**PR-41** expired after 24h")
-    assert texts[1] == "**PR-41** is expired, not pending."
-    assert h.gh.count("execute") == 0
+    fx = h.sweep("sweep after 25h")
+    assert any(t.text.startswith("**GOALS-1** expired after 24h") for t in _posts(fx))
+    assert h.goals().state.value == "expired"
+    fx = h.approve_goals("m-late")
+    assert _posts(fx)[0].text == "**GOALS-1** is expired, not pending."
+    assert h.rooms.count("execute") == 0
     h.assert_no_leaks()
-
     write_report(
         "test_07_expiry",
-        "Test 7 · Expiry",
-        """
-`SPEC-1` is proposed and nobody decides. The clock advances 23 h (sweep: nothing), then past
-24 h (sweep: expire). Leonardo approves late. `product` re-proposes. Later a pull request is
-left pending for 25 h and Isaac approves it.
-""",
+        "Test 7 — Goals pending past their TTL",
+        __doc__ or "",
         h,
-        """
-**PASS.** The sweep expired `SPEC-1` exactly when due, told `product` in the spec's thread,
-and opened no room. The late approval was refused ("expired, not pending"). The re-proposal got
-a new id. The stale pull request was expired at approval time with the same template and no
-merge.
-""",
-        [
-            "`expired`; `product` is told; no room opened",
-            "a late approval is refused; the same guard covers PR-n",
-        ],
+        "PASS: expired by the sweep, the late yes refused, no room opened.",
+        ["the sweep expires the goals and says so", "a late approve is refused", "no Gateway call"],
     )

@@ -12,14 +12,14 @@ def test_template_instructions_match_agent_md(repo_root):
     data = yaml.safe_load((repo_root / "templates" / "sindarin.template.yaml").read_text())
     assert data["version"] == 1
     by_name = {a["name"]: a for a in data["agents"]}
-    assert set(by_name) == {"product", "coder", "reviewer", "release"}
+    assert set(by_name) == {"analyst", "planner", "bookkeeper"}
     for role, agent in by_name.items():
         agent_md = (repo_root / "agents" / role / "AGENT.md").read_text().rstrip("\n")
         assert agent["instructions"].rstrip("\n") == agent_md, role
     names = [r["name"] for r in data["rooms"]]
-    assert names == ["{team}-acme-shared", "{team}-product", "{team}-releases"]
+    assert names == ["{team}-acme-finance", "{team}-planning"]
     assert data["params"]["switch_executor"]["type"] == "agent"
-    assert data["params"]["github_executor"]["type"] == "agent"
+    assert data["params"]["ledger_executor"]["type"] == "agent"
 
 
 def test_scripts_exist_and_are_executable(repo_root):
@@ -76,17 +76,3 @@ def test_policy_and_users_hold_only_participant_ids(repo_root):
             assert re.fullmatch(r"@switch-[a-z]+-[A-Za-z0-9._-]+:localhost", pid), pid
         for pat in ("ghp_", "github_pat_", "sk-ant-", "API_KEY", "PASSWORD"):
             assert pat not in text, pat
-
-
-def test_demo_app_is_self_contained(repo_root):
-    app = repo_root / "demo-app"
-    for rel in (
-        "README.md",
-        "pyproject.toml",
-        "app/orders.py",
-        "app/server.py",
-        "tests/test_export.py",
-    ):
-        assert (app / rel).exists(), rel
-    readme = (app / "README.md").read_text()
-    assert "branch protection" in readme.lower() and "sindarin-github" in readme

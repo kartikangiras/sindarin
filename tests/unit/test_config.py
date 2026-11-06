@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+import pytest
+
 from sindarin.executor.config import (
     Env,
     ExecutorConfig,
@@ -11,76 +13,73 @@ from sindarin.executor.config import (
     load_env,
     load_executor,
     parse_env_text,
+    process_env,
     render_config,
     save_config,
     write_env_values,
 )
-from sindarin.names import GITHUB_EXECUTOR, SWITCH_EXECUTOR
+from sindarin.names import LEDGER_EXECUTOR, SWITCH_EXECUTOR
 
 
 def test_parse_env_text():
     text = """
 # comment
-SWITCH_BRIDGE_URL=http://localhost:8080   # trailing comment
-SWITCH_AGENT_ID="agent-1"
-export GITHUB_TOKEN='github_pat_TEST'
+SWITCH_BRIDGE_URL=http://localhost:8000
+export SWITCH_AGENT_ID='a1'
+SWITCH_AGENT_API_KEY="k e y"
 EMPTY=
-BAD LINE
 """
     assert parse_env_text(text) == {
-        "SWITCH_BRIDGE_URL": "http://localhost:8080",
-        "SWITCH_AGENT_ID": "agent-1",
-        "GITHUB_TOKEN": "github_pat_TEST",
+        "SWITCH_BRIDGE_URL": "http://localhost:8000",
+        "SWITCH_AGENT_ID": "a1",
+        "SWITCH_AGENT_API_KEY": "k e y",
         "EMPTY": "",
     }
 
 
 def test_write_env_values_preserves_lines_and_mode(tmp_path):
-    p = tmp_path / "x.env"
-    p.write_text("# keep me\nSWITCH_BRIDGE_URL=http://old\nGITHUB_TOKEN=\n")
-    write_env_values(p, {"SWITCH_BRIDGE_URL": "http://new", "SWITCH_AGENT_ID": "a1"})
-    assert (
-        p.read_text()
-        == "# keep me\nSWITCH_BRIDGE_URL=http://new\nGITHUB_TOKEN=\nSWITCH_AGENT_ID=a1\n"
+    p = tmp_path / ".env"
+    p.write_text("# keep me\nSWITCH_BRIDGE_URL=http://old\nANTHROPIC_API_KEY=\n")
+    write_env_values(p, {"SWITCH_BRIDGE_URL": "http://new", "ANALYST_SWITCH_AGENT_ID": "a1"})
+    assert p.read_text() == (
+        "# keep me\nSWITCH_BRIDGE_URL=http://new\nANTHROPIC_API_KEY=\nANALYST_SWITCH_AGENT_ID=a1\n"
     )
-    assert oct(p.stat().st_mode & 0o777) == "0o600"
-    q = tmp_path / "new.env"
-    write_env_values(q, {"SWITCH_AGENT_API_KEY": "k"})
-    assert oct(q.stat().st_mode & 0o777) == "0o600" and q.read_text() == "SWITCH_AGENT_API_KEY=k\n"
+    assert (p.stat().st_mode & 0o777) == 0o600
 
 
 def test_load_env_process_env_overrides(tmp_path, monkeypatch):
-    p = tmp_path / "github.env"
-    p.write_text("GITHUB_TOKEN=file-token\n")
-    monkeypatch.setenv("GITHUB_TOKEN", "env-token")
+    p = tmp_path / "x.env"
+    p.write_text("SWITCH_GATEWAY_PASSWORD=file-pw\n")
+    monkeypatch.setenv("SWITCH_GATEWAY_PASSWORD", "env-pw")
     env = Env.from_values(load_env(p))
-    assert env.github_token == "env-token"
-    assert Env.from_values(load_env(p, env_override=False)).github_token == "file-token"
-    assert env.missing("SWITCH_AGENT_ID", "GITHUB_TOKEN") == ["SWITCH_AGENT_ID"]
+    assert env.gateway_password == "env-pw"
+    assert Env.from_values(load_env(p, env_override=False)).gateway_password == "file-pw"
+    assert env.missing("SWITCH_AGENT_ID", "SWITCH_GATEWAY_PASSWORD") == ["SWITCH_AGENT_ID"]
     assert Env.from_values({"SWITCH_BRIDGE_URL": "http://x/"}).gateway_url == "http://x"
 
 
 def test_config_round_trip_and_load_executor(tmp_path):
     cfg = ExecutorConfig(
-        executor=GITHUB_EXECUTOR,
-        self_id="@switch-agent-7:s",
-        peer_ids=["@switch-agent-8:s"],
-        github_mode="simulated",
+        executor=LEDGER_EXECUTOR, self_id="@switch-agent-7:s", peer_ids=["@switch-agent-8:s"]
     )
-    save_config(tmp_path / "github.yaml", cfg)
-    again = load_config(tmp_path / "github.yaml")
-    assert again == cfg and again.missing() == [] and again.short == "github"
-    assert "Secrets live in github.env" in render_config(cfg)
-    assert again.db_path(tmp_path) == tmp_path / "github.db"
-    assert load_config(tmp_path / "missing.yaml").missing() == ["self_id"]
-    (tmp_path / "switch.env").write_text("SWITCH_GATEWAY_EMAIL=a@b\n")
-    env, scfg = load_executor(tmp_path, "switch")
+    exec_dir = tmp_path / "executor"
+    exec_dir.mkdir()
+    save_config(exec_dir / "ledger.yaml", cfg)
+    again = load_config(exec_dir / "ledger.yaml")
+    assert again == cfg and again.missing() == [] and again.short == "ledger"
+    assert "the only process that writes" in render_config(cfg)
+    assert again.db_path(exec_dir) == exec_dir / "ledger.db"
+    assert again.resolve(exec_dir, again.ledger_db) == exec_dir / "books.db"
+    assert load_config(exec_dir / "missing.yaml").missing() == ["self_id"]
+    (tmp_path / ".env").write_text(
+        "SWITCH_GATEWAY_EMAIL=a@b\nSINDARIN_SWITCH_SWITCH_AGENT_ID=sw-id\nANTHROPIC_API_KEY=sk\n"
+    )
+    env, scfg = load_executor(exec_dir, "switch")
     assert scfg.executor == SWITCH_EXECUTOR and env.gateway_email == "a@b"
-    assert cfg.resolve(tmp_path, "/abs/policy.yaml") == Path("/abs/policy.yaml")
-    assert (
-        cfg.resolve(tmp_path, "../agents/policy/policy.yaml")
-        == (tmp_path / "../agents/policy/policy.yaml").resolve()
-    )
+    assert env.agent_id == "sw-id"
+    env, lcfg = load_executor(exec_dir, "ledger")
+    assert lcfg.executor == LEDGER_EXECUTOR and env.gateway_email == ""  # not its credential
+    assert cfg.resolve(exec_dir, "/abs/policy.yaml") == Path("/abs/policy.yaml")
 
 
 def test_find_executor_dir(tmp_path, monkeypatch):
@@ -90,35 +89,100 @@ def test_find_executor_dir(tmp_path, monkeypatch):
     assert find_executor_dir() == (tmp_path / "y").resolve()
     monkeypatch.delenv("SINDARIN_EXECUTOR_DIR")
     (tmp_path / "proj" / "executor").mkdir(parents=True)
-    (tmp_path / "proj" / "executor" / "switch.yaml").write_text("")
+    (tmp_path / "proj" / "executor" / "ledger.yaml").write_text("")
     (tmp_path / "proj" / "sub").mkdir()
     monkeypatch.chdir(tmp_path / "proj" / "sub")
     assert find_executor_dir() == (tmp_path / "proj" / "executor").resolve()
 
 
 def test_committed_examples_and_gitignore(repo_root):
-    for short in ("switch", "github"):
-        values = parse_env_text((repo_root / "executor" / f"{short}.env.example").read_text())
-        assert values["SWITCH_AGENT_API_KEY"] == ""
-        assert (
-            values.get("GITHUB_TOKEN", "") == "" and values.get("SWITCH_GATEWAY_PASSWORD", "") == ""
-        )
-        assert os.path.exists(repo_root / "executor" / f"{short}.yaml")
+    """One env template at the root: every key a person fills and every identity bootstrap writes,
+    all empty but the defaults; the real .env and the state files are ignored."""
+    from sindarin.executor.config import IDENTITY_KEYS, PROCESSES, env_prefix
+
+    root = parse_env_text((repo_root / ".env.example").read_text())
+    assert set(root) >= {"ANTHROPIC_API_KEY", "MATTERMOST_URL", "MATTERMOST_USER"}
+    assert set(root) >= {"SWITCH_GATEWAY_EMAIL", "SWITCH_GATEWAY_PASSWORD"}
+    assert not any("GITHUB" in k or "CODER" in k for k in root)
+    for process in PROCESSES:
+        for key in IDENTITY_KEYS:
+            assert env_prefix(process) + key in root, (process, key)
+    defaults = {"MATTERMOST_TEAM_NAME", "SWITCH_BRIDGE_URL"}
+    assert all(v == "" for k, v in root.items() if k not in defaults), root
+    assert not list((repo_root / "executor").glob("*.env*"))
+    for short in ("switch", "ledger"):
+        assert os.path.exists(repo_root / "executor" / f"{short}.yaml"), short
     gitignore = (repo_root / ".gitignore").read_text()
-    for line in (
-        "executor/*.env",
-        "agents/*/.env",
-        "executor/*.db",
-        "executor/simulated-github.json",
-    ):
+    for line in ("/.env", "executor/*.db"):
         assert line in gitignore, line
-    assert load_config(repo_root / "executor" / "github.yaml").executor == GITHUB_EXECUTOR
-    assert load_config(repo_root / "executor" / "switch.yaml").peer_state_db == "github.db"
+    assert load_config(repo_root / "executor" / "ledger.yaml").executor == LEDGER_EXECUTOR
+    assert load_config(repo_root / "executor" / "switch.yaml").peer_state_db == "ledger.db"
+    assert load_config(repo_root / "executor" / "ledger.yaml").peer_state_db == "switch.db"
+
+
+def test_process_env_hands_each_process_only_its_keys(tmp_path, monkeypatch):
+    """One root .env (design v4 §5): each process gets SWITCH_BRIDGE_URL, its own prefixed
+    identity and the keys named for it. The Gateway credential reaches sindarin-switch alone, the
+    model key the three agents, and sindarin-ledger nothing but its identity."""
+    from sindarin.executor.config import ensure_root_env, identity_values
+
+    (tmp_path / ".env").write_text(
+        "ANTHROPIC_API_KEY=sk-model\nMATTERMOST_ADMIN_PASSWORD=mm-secret\n"
+        "SWITCH_BRIDGE_URL=http://localhost:8000\n"
+        "SWITCH_GATEWAY_EMAIL=admin@x\nSWITCH_GATEWAY_PASSWORD=gw\n"
+        "SWITCH_AGENT_API_KEY=never-unprefixed\n"
+        "ANALYST_SWITCH_AGENT_ID=a-id\nANALYST_SWITCH_AGENT_API_KEY=a-key\n"
+        "PLANNER_SWITCH_AGENT_ID=t-id\nPLANNER_SWITCH_AGENT_API_KEY=t-key\n"
+        "SINDARIN_LEDGER_SWITCH_AGENT_ID=l-id\nSINDARIN_LEDGER_SWITCH_AGENT_API_KEY=l-key\n"
+        "SINDARIN_SWITCH_SWITCH_AGENT_ID=sw-id\nSINDARIN_SWITCH_SWITCH_AGENT_API_KEY=sw-key\n"
+    )
+    analyst = process_env(tmp_path, "analyst")
+    assert analyst == {
+        "SWITCH_BRIDGE_URL": "http://localhost:8000",
+        "ANTHROPIC_API_KEY": "sk-model",
+        "SWITCH_AGENT_ID": "a-id",
+        "SWITCH_AGENT_API_KEY": "a-key",
+    }
+    planner = process_env(tmp_path, "planner")
+    assert planner["SWITCH_AGENT_ID"] == "t-id" and "MATTERMOST_ADMIN_PASSWORD" not in planner
+    assert not any(k.startswith(("ANALYST_", "SINDARIN_")) for k in planner)
+    ledger = process_env(tmp_path, "sindarin-ledger")
+    assert ledger == {
+        "SWITCH_BRIDGE_URL": "http://localhost:8000",
+        "SWITCH_AGENT_ID": "l-id",
+        "SWITCH_AGENT_API_KEY": "l-key",
+    }
+    switch = process_env(tmp_path, "sindarin-switch")
+    assert switch["SWITCH_AGENT_API_KEY"] == "sw-key" and switch["SWITCH_GATEWAY_PASSWORD"] == "gw"
+    assert "ANTHROPIC_API_KEY" not in switch and "SWITCH_GATEWAY_PASSWORD" not in ledger
+
+    # the shell wins for executors' ENV_KEYS when asked; never otherwise
+    monkeypatch.setenv("SWITCH_GATEWAY_PASSWORD", "shell-pw")
+    over = process_env(tmp_path, "sindarin-switch", env_override=True)
+    assert over["SWITCH_GATEWAY_PASSWORD"] == "shell-pw"
+    assert process_env(tmp_path, "sindarin-switch")["SWITCH_GATEWAY_PASSWORD"] == "gw"
+    assert process_env(tmp_path / "elsewhere", "sindarin-switch") == {}
+    with pytest.raises(ValueError):
+        process_env(tmp_path, "coder")
+
+    (tmp_path / "fresh").mkdir()
+    (tmp_path / "fresh" / ".env.example").write_text("# template\nANTHROPIC_API_KEY=\n")
+    path = ensure_root_env(tmp_path / "fresh")
+    assert path.read_text().startswith("# template") and (path.stat().st_mode & 0o777) == 0o600
+    identity = {"SWITCH_AGENT_ID": "g", "SWITCH_AGENT_API_KEY": "k", "SWITCH_CONNECTION_ID": "c"}
+    write_env_values(
+        path, {"SWITCH_BRIDGE_URL": "http://b", **identity_values("sindarin-ledger", identity)}
+    )
+    assert "SINDARIN_LEDGER_SWITCH_AGENT_API_KEY=k" in path.read_text()
+    assert process_env(tmp_path / "fresh", "sindarin-ledger") == {
+        "SWITCH_BRIDGE_URL": "http://b",
+        **identity,
+    }
 
 
 def test_mattermost_target_resolution(tmp_path):
-    """Bundled server from the stack env by default; a server of your own from mattermost.env,
-    which wins when present (explicitly or at executor/mattermost.env)."""
+    """Bundled server from the stack env by default; a server of your own once the root .env
+    sets MATTERMOST_URL; the driver account rides along."""
     from sindarin.bootstrap import MattermostTarget
 
     stack = {
@@ -126,40 +190,41 @@ def test_mattermost_target_resolution(tmp_path):
         "MATTERMOST_ADMIN_USER": "admin",
         "MATTERMOST_ADMIN_PASSWORD": "pw",
         "MATTERMOST_TEAM_NAME": "switch",
+        "MATTERMOST_USER": "user",
+        "MATTERMOST_USER_PASSWORD": "upw",
     }
+    (tmp_path / ".env").write_text("ANTHROPIC_API_KEY=sk\nMATTERMOST_URL=\n")
     bundled = MattermostTarget.resolve(tmp_path, stack)
     assert bundled.url == "http://localhost:8065" and bundled.team_name == "switch"
-    assert not bundled.own and bundled.connection_config()["url"] == "http://localhost:8065"
+    assert not bundled.own and bundled.user == "user" and bundled.user_password == "upw"
 
-    (tmp_path / "executor").mkdir()
-    (tmp_path / "executor" / "mattermost.env").write_text(
+    (tmp_path / ".env").write_text(
         "MATTERMOST_URL=https://acme.cloud.mattermost.com/\n"
         "MATTERMOST_ADMIN_USER=ops\nMATTERMOST_ADMIN_PASSWORD=secret\n"
+        "MATTERMOST_USER=kartik\nMATTERMOST_USER_PASSWORD=kpw\n"
         "MATTERMOST_TEAM_NAME=acme\nMATTERMOST_INTERNAL_URL=\n"
     )
     own = MattermostTarget.resolve(tmp_path, stack)
-    assert own.own and own.url == "https://acme.cloud.mattermost.com"
-    assert own.team_name == "acme" and own.bridge_name == "Mattermost acme.cloud.mattermost.com"
-    cfg = own.connection_config()
-    assert cfg == {
+    assert own.own and own.url == "https://acme.cloud.mattermost.com" and own.user == "kartik"
+    assert own.bridge_name == "Mattermost acme.cloud.mattermost.com"
+    assert own.connection_config() == {
         "url": "https://acme.cloud.mattermost.com",
         "admin_user": "ops",
         "admin_password": "secret",
         "team_name": "acme",
     }
-
-    local = MattermostTarget.from_env_text(
-        "MATTERMOST_URL=http://localhost:8066\nMATTERMOST_INTERNAL_URL=http://host.docker.internal:8066\n"
-        "MATTERMOST_ADMIN_USER=a\nMATTERMOST_ADMIN_PASSWORD=b\nSWITCH_BRIDGE_NAME=Lab\n"
+    local = MattermostTarget.from_values(
+        parse_env_text(
+            "MATTERMOST_URL=http://localhost:8066\n"
+            "MATTERMOST_INTERNAL_URL=http://host.docker.internal:8066\n"
+            "MATTERMOST_ADMIN_USER=a\nMATTERMOST_ADMIN_PASSWORD=b\nSWITCH_BRIDGE_NAME=Lab\n"
+        )
     )
     assert local.connection_config()["url"] == "http://host.docker.internal:8066"
     assert local.connection_config()["public_url"] == "http://localhost:8066"
-    assert local.bridge_name == "Lab"
-
-    import pytest
-
+    (tmp_path / ".env").write_text("MATTERMOST_URL=https://x\nMATTERMOST_ADMIN_USER=a\n")
     with pytest.raises(ValueError, match="MATTERMOST_ADMIN_PASSWORD"):
-        MattermostTarget.from_env_text("MATTERMOST_URL=https://x\nMATTERMOST_ADMIN_USER=a\n")
+        MattermostTarget.resolve(tmp_path, stack)
 
 
 def test_ensure_bridge_connects_once_and_makes_it_default():
@@ -194,13 +259,15 @@ def test_ensure_bridge_connects_once_and_makes_it_default():
         {"MATTERMOST_ADMIN_USER": "a", "MATTERMOST_ADMIN_PASSWORD": "b"}
     )
     assert ensure_bridge(admin, bundled) == ("b-bundled", False) and not admin.created
-
-    own = MattermostTarget.from_env_text(
-        "MATTERMOST_URL=https://mm.example.com\nMATTERMOST_ADMIN_USER=a\n"
-        "MATTERMOST_ADMIN_PASSWORD=b\nMATTERMOST_TEAM_NAME=t\n"
+    own = MattermostTarget.from_values(
+        {
+            "MATTERMOST_URL": "https://mm.example.com",
+            "MATTERMOST_ADMIN_USER": "a",
+            "MATTERMOST_ADMIN_PASSWORD": "b",
+            "MATTERMOST_TEAM_NAME": "t",
+        }
     )
     assert ensure_bridge(admin, own) == ("b-1", True)
     assert admin.created == ["Mattermost mm.example.com"] and admin.defaults == ["b-1"]
-    # second run: found by name, not created again, made default if it is not
     assert ensure_bridge(admin, own) == ("b-1", False)
-    assert admin.created == ["Mattermost mm.example.com"] and admin.defaults == ["b-1", "b-1"]
+    assert admin.defaults == ["b-1", "b-1"]

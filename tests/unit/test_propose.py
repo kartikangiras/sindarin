@@ -1,111 +1,85 @@
-"""`sindarin propose` validators (DDD §6): the agents' one tool, as plain functions."""
+"""The agents' validators (design v5 §4): a fence can only be a well-formed proposal."""
 
 from __future__ import annotations
 
 import pytest
-from validation.harness import FIXTURES, ISAAC, REPO, VINCENT
+from validation.harness import BASIS, DATA, PERIOD, POLICY
 
-from sindarin.policy import load_policy
-from sindarin.propose import build_pr, build_release, build_spec, render
+from sindarin.agents.finance import plan_goals, standard_budget_lines
+from sindarin.ledger import Ledger
+from sindarin.propose import build_budget, build_entries, build_goals, render
 
 
 @pytest.fixture
-def policy():
-    return load_policy(FIXTURES / "policy.yaml")
+def books(tmp_path):
+    ledger = Ledger(tmp_path / "books.db")
+    ledger.import_dir(DATA / BASIS)
+    yield ledger
+    ledger.close()
 
 
-SPEC = dict(
-    title="CSV export",
-    press_release="Acme can export orders as CSV.",
-    faq=["a", "b", "c"],
-    criteria=["1", "2", "3"],
-    scope_in=[],
-    scope_out=[],
-    target_date="2026-11-07",
-    engineer=ISAAC,
-    repo=REPO,
-    slug="feat-csv-export",
-    ask="m1",
-    justification="asked",
-)
-
-
-def test_build_spec_and_render(policy):
-    p = build_spec(policy, **SPEC)
-    assert p.rule == "spec" and render(p).startswith(
-        "@sindarin-switch proposal\n```sindarin-proposal\n"
+def test_builders_render_the_owning_executor(books):
+    goals = build_goals(
+        POLICY,
+        period=PERIOD,
+        basis=BASIS,
+        title="Plan November 2026",
+        summary="grow on October",
+        report=["Revenue 89,905.00 USD"],
+        justification="asked",
+        **plan_goals(books, PERIOD, BASIS),
     )
-    with pytest.raises(ValueError, match="not allowed by rule spec"):
-        build_spec(policy, **{**SPEC, "repo": "acme/other"})
-    with pytest.raises(ValueError, match="engineer is not in group"):
-        build_spec(policy, **{**SPEC, "engineer": VINCENT})
-    with pytest.raises(ValueError, match="faq"):
-        build_spec(policy, **{**SPEC, "faq": ["only one"]})
-    with pytest.raises(ValueError, match="target_date"):
-        build_spec(policy, **{**SPEC, "target_date": "soon"})
-    with pytest.raises(ValueError, match="unknown spec rule"):
-        build_spec(policy, **{**SPEC, "rule": "merge"})
-    long = build_spec(policy, **{**SPEC, "justification": "x" * 400})
-    assert len(long.justification) == 280
-
-
-def test_build_pr_and_release(policy):
-    p = build_pr(
-        policy,
-        number=41,
-        title="t",
-        branch="feat/SPEC-1",
-        spec="SPEC-1",
-        repo=REPO,
-        head_sha="a" * 40,
-        justification="ok",
+    assert render(goals).startswith("@sindarin-switch proposal\n```sindarin-proposal")
+    lines = standard_budget_lines(1600000)
+    budget = build_budget(POLICY, period=PERIOD, goals="GOALS-1", lines=lines, justification="x")
+    assert render(budget).startswith("@sindarin-ledger proposal")
+    assert budget.body.total_cents == 1600000 and sum(x["amount_cents"] for x in lines) == 1600000
+    entries = build_entries(
+        POLICY,
+        period=PERIOD,
+        goals="GOALS-1",
+        budget="BUDGET-1",
+        lines=lines,
+        memo="Budget November",
+        justification="recorded",
     )
-    assert p.target == f"{REPO}#41" and p.snapshot_hint == "a" * 40 and p.rule == "merge"
-    assert render(p).startswith("@sindarin-github proposal\n")
-    with pytest.raises(ValueError, match="not allowed by rule merge"):
-        build_pr(
-            policy,
-            number=41,
+    assert entries.rule == "entries" and entries.body.budget == "BUDGET-1"
+
+
+def test_builders_refuse_in_one_line(books):
+    lines = standard_budget_lines(1600000)
+    with pytest.raises(ValueError, match="currency"):
+        build_budget(
+            POLICY, period=PERIOD, goals="GOALS-1", lines=lines, currency="EUR", justification="x"
+        )
+    with pytest.raises(ValueError, match="below the revenue target"):
+        build_goals(
+            POLICY,
+            period=PERIOD,
+            basis=BASIS,
             title="t",
-            branch="b",
-            spec="SPEC-1",
-            repo="acme/other",
+            summary="s",
+            report=[],
+            revenue_target_cents=100,
+            margin_target_bps=0,
+            cost_cap_cents=200,
             justification="x",
         )
-    with pytest.raises(ValueError, match="spec"):
-        build_pr(
-            policy, number=41, title="t", branch="b", spec="PR-1", repo=REPO, justification="x"
+    with pytest.raises(ValueError, match="unknown budget rule"):
+        build_budget(
+            POLICY, period=PERIOD, goals="GOALS-1", lines=lines, justification="x", rule="goals"
         )
-    r = build_release(
-        policy,
-        tag="v1.4.0",
-        target_sha="b" * 40,
-        notes="n",
-        specs=["SPEC-1"],
-        asks=["m1"],
-        repo=REPO,
-        justification="go",
-    )
-    assert r.target == f"{REPO}@v1.4.0" and r.ask == "m1"
-    with pytest.raises(ValueError, match="does not match"):
-        build_release(
-            policy,
-            tag="1.4",
-            target_sha="b" * 40,
-            notes="n",
-            specs=["SPEC-1"],
-            asks=[],
-            repo=REPO,
-            justification="go",
+    with pytest.raises(ValueError, match="pattern"):
+        build_entries(
+            POLICY,
+            period="November",
+            goals="GOALS-1",
+            budget="BUDGET-1",
+            lines=lines,
+            memo="m",
+            justification="x",
         )
-    with pytest.raises(ValueError, match="target_sha"):
-        build_release(
-            policy,
-            tag="v1.4.0",
-            target_sha="short",
-            notes="n",
-            specs=["SPEC-1"],
-            asks=[],
-            repo=REPO,
-            justification="go",
+    with pytest.raises(ValueError, match="repeat"):
+        build_budget(
+            POLICY, period=PERIOD, goals="GOALS-1", lines=lines + lines[:1], justification="x"
         )
