@@ -1,12 +1,12 @@
-# sindarin-ledger (design v4 §5). Owns PAY-n and LOCK-n; the only process that writes ledger_db.
+# sindarin-ledger (design v5 §5). Owns BUDGET-n and ENTRIES-n; the only process that writes ledger_db.
 # Secrets live in the root .env, never here.
 executor: sindarin-ledger
 room_names:
-  product: '#product'
-  releases: '#releases'
-  customer: '#acme-shared'
-self_id: ''
-peer_ids: []
+  finance: '#acme-finance'
+  planning: '#planning'
+self_id: '@switch-agent-fe792a08:localhost'
+peer_ids:
+- '@switch-agent-99c39840:localhost'
 policy_path: ../agents/policy/policy.yaml
 users_path: ../agents/policy/users.yaml
 state_db: ''

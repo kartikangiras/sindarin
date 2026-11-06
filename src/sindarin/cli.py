@@ -15,21 +15,17 @@ from sindarin import __version__
 from sindarin.names import AGENT_ROLES
 
 app = typer.Typer(
-    help="Sindarin: propose, audit, bootstrap and check the workflow.",
+    help="Sindarin: bootstrap, run and check the planning workflow.",
     no_args_is_help=True,
 )
-propose_app = typer.Typer(
-    help="Validate a proposal and print the block to post verbatim.", no_args_is_help=True
+ledger_app = typer.Typer(
+    help="The ledger: import a period, show it, land a late sale, reset.", no_args_is_help=True
 )
-adapter_app = typer.Typer(help="Adapter checks.", no_args_is_help=True)
 exec_app = typer.Typer(
-    help="Sindarin executors: sindarin-switch and sindarin-github.", no_args_is_help=True
+    help="Sindarin executors: sindarin-switch and sindarin-ledger.", no_args_is_help=True
 )
-agent_app = typer.Typer(
-    help="Sindarin agents: product, coder, reviewer, release.", no_args_is_help=True
-)
-app.add_typer(propose_app, name="propose")
-app.add_typer(adapter_app, name="adapter")
+agent_app = typer.Typer(help="Sindarin agents: analyst, planner, bookkeeper.", no_args_is_help=True)
+app.add_typer(ledger_app, name="ledger")
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -74,130 +70,141 @@ def _agent_root() -> None:
     """Sindarin agent command group."""
 
 
-@propose_app.callback()
-def _propose_root() -> None:
-    """Proposal validators (the agents' one tool, as a command)."""
+def _ledger(executor_dir: Path | None):
+    from sindarin.executor.config import load_config
+    from sindarin.ledger import Ledger
+
+    exec_dir = _exec_dir(executor_dir)
+    cfg = load_config(exec_dir / "ledger.yaml")
+    return Ledger(cfg.resolve(exec_dir, cfg.ledger_db)), cfg.resolve(exec_dir, cfg.data_dir), cfg
 
 
 # ---------------------------------------------------------------------------------------------
-# sindarin propose spec | pr | release (DDD §6; the executors never trust this validation)
+# sindarin ledger import | show | add-sale | amend | reset (design v5 §5)
 # ---------------------------------------------------------------------------------------------
 
 
-def policy_path_from_env() -> Path:
-    return Path(
-        os.environ.get("SINDARIN_POLICY_PATH") or REPO_ROOT / "agents" / "policy" / "policy.yaml"
+@ledger_app.command("import")
+def ledger_import(
+    period: Annotated[str | None, typer.Option(help="YYYY-MM; default every folder")] = None,
+    executor_dir: Annotated[Path | None, typer.Option()] = None,
+) -> None:
+    """Load a period folder (accounts.csv, sales.csv, payables.csv, targets.csv) into the ledger."""
+    ledger, data_dir, _ = _ledger(executor_dir)
+    folders = [data_dir / period] if period else sorted(p for p in data_dir.iterdir() if p.is_dir())
+    total = {"accounts": 0, "sales": 0, "payables": 0, "targets": 0}
+    for folder in folders:
+        if not (folder / "sales.csv").exists():
+            _fail(f"no sales.csv in {folder}")
+        counts = ledger.import_dir(folder)
+        for k, v in counts.items():
+            total[k] += v
+        print(f"imported {folder.name}: {counts}")
+    print(f"ledger {ledger.path}: {total['sales']} sales rows, {total['payables']} payables")
+
+
+@ledger_app.command("show")
+def ledger_show(
+    period: Annotated[str | None, typer.Argument(help="YYYY-MM; default the newest")] = None,
+    executor_dir: Annotated[Path | None, typer.Option()] = None,
+) -> None:
+    """The period's state, its targets, its recorded budget, the trial balance, the payables."""
+    from sindarin.ledger import render_trial_balance
+    from sindarin.schema import money, percent
+
+    ledger, _, _ = _ledger(executor_dir)
+    periods = ledger.periods()
+    if not periods:
+        _fail("the ledger is empty; run `sindarin ledger import`")
+    period = period or periods[-1]
+    s = ledger.summary(period)
+    print(
+        f"{period} · {s['period_status']} · revenue {money(s['revenue_cents'])} · costs "
+        f"{money(s['costs_cents'])} · margin {percent(s['margin_bps'])}"
+    )
+    t = s["targets"]
+    if t:
+        print(
+            f"targets ({t['source']}): revenue {money(t['revenue_cents'])} · margin "
+            f"{percent(t['margin_bps'])} · cost cap {money(t['cost_cap_cents'])}"
+        )
+    for row in s["budget"]:
+        print(
+            f"budget {row['department']} {row['account']} {money(row['amount_cents'])} "
+            f"({row['source']})"
+        )
+    for row in ledger.planned(period):
+        print(
+            f"planned {row['department']} {row['account']} {money(row['amount_cents'])} "
+            f"({row['source']})"
+        )
+    print(render_trial_balance(ledger, period))
+    for row in ledger.payables(period=period):
+        tail = f" ({row['run_id']})" if row.get("run_id") else ""
+        print(
+            f"{row['invoice']} {row['vendor']} {money(row['amount_cents'])} {row['status']}{tail}"
+        )
+
+
+@ledger_app.command("add-sale")
+def ledger_add_sale(
+    invoice: Annotated[str, typer.Argument(help="e.g. S-2026-1055")],
+    amount: Annotated[str, typer.Option(help="e.g. 3980.00")],
+    customer: Annotated[str, typer.Option()] = "Contoso Ltd",
+    date: Annotated[
+        str, typer.Option(help="YYYY-MM-DD; default the last day of the newest period")
+    ] = "",
+    executor_dir: Annotated[Path | None, typer.Option()] = None,
+) -> None:
+    """A late sale lands in the books: the demo's 'changed after the proposal' moment."""
+    from sindarin.ledger import LedgerError
+    from sindarin.schema import money
+
+    ledger, _, _ = _ledger(executor_dir)
+    if not date:
+        periods = [p for p in ledger.periods() if ledger.sales(p)]
+        if not periods:
+            _fail("the ledger has no sales to add to; run `sindarin ledger import`")
+        date = f"{periods[-1]}-28"
+    cents = round(float(amount) * 100)
+    try:
+        row = ledger.add_sale(invoice, date, customer, cents)
+    except LedgerError as exc:
+        _fail(str(exc))
+        return
+    print(
+        f"{row['invoice']} {row['customer']} {money(row['amount_cents'])} landed on {row['date']}"
     )
 
 
-@propose_app.command("spec")
-def propose_spec(
-    title: Annotated[str, typer.Option()],
-    press_release: Annotated[str, typer.Option(help="One sentence")],
-    faq: Annotated[list[str], typer.Option(help="Exactly three, repeat the flag")],
-    criteria: Annotated[list[str], typer.Option(help="Three to five, repeat the flag")],
-    target_date: Annotated[str, typer.Option(help="ISO date")],
-    engineer: Annotated[str, typer.Option(help="Participant id of the engineer")],
-    repo: Annotated[str, typer.Option(help="owner/repo from allowed_repos")],
-    slug: Annotated[str, typer.Option(help="Feature room slug, e.g. feat-csv-export")],
-    justification: Annotated[str, typer.Option(help="One line, the customer's words")],
-    scope_in: Annotated[list[str] | None, typer.Option()] = None,
-    scope_out: Annotated[list[str] | None, typer.Option()] = None,
-    ask: Annotated[str, typer.Option(help="Ask thread root message id")] = "",
-    rule: Annotated[str | None, typer.Option()] = None,
+@ledger_app.command("amend")
+def ledger_amend(
+    invoice: Annotated[str, typer.Argument(help="e.g. INV-1042")],
+    amount: Annotated[str, typer.Option(help="new amount, e.g. 4900.00")],
+    executor_dir: Annotated[Path | None, typer.Option()] = None,
 ) -> None:
-    from sindarin.propose import build_spec, policy_from, render
+    """Edit an open payable: the other way the books move under a proposal."""
+    from sindarin.ledger import LedgerError
+    from sindarin.schema import money
 
+    ledger, _, _ = _ledger(executor_dir)
+    cents = round(float(amount) * 100)
     try:
-        p = build_spec(
-            policy_from(policy_path_from_env()),
-            title=title,
-            press_release=press_release,
-            faq=faq,
-            criteria=criteria,
-            scope_in=scope_in or [],
-            scope_out=scope_out or [],
-            target_date=target_date,
-            engineer=engineer,
-            repo=repo,
-            slug=slug,
-            ask=ask,
-            justification=justification,
-            rule=rule,
-        )
-    except ValueError as exc:
+        row = ledger.amend_payable(invoice, cents)
+    except LedgerError as exc:
         _fail(str(exc))
         return
-    print(render(p))
+    print(f"{row['invoice']} {row['vendor']} is now {money(row['amount_cents'])}")
 
 
-@propose_app.command("pr")
-def propose_pr(
-    number: Annotated[int, typer.Option()],
-    title: Annotated[str, typer.Option()],
-    branch: Annotated[str, typer.Option()],
-    spec: Annotated[str, typer.Option(help="SPEC-n")],
-    repo: Annotated[str, typer.Option()],
-    justification: Annotated[str, typer.Option()],
-    head_sha: Annotated[str, typer.Option(help="40-hex head, if known")] = "",
-    ask: Annotated[str, typer.Option()] = "",
-    rule: Annotated[str | None, typer.Option()] = None,
-) -> None:
-    from sindarin.propose import build_pr, policy_from, render
-
-    try:
-        p = build_pr(
-            policy_from(policy_path_from_env()),
-            number=number,
-            title=title,
-            branch=branch,
-            spec=spec,
-            repo=repo,
-            head_sha=head_sha,
-            ask=ask,
-            justification=justification,
-            rule=rule,
-        )
-    except ValueError as exc:
-        _fail(str(exc))
-        return
-    print(render(p))
-
-
-@propose_app.command("release")
-def propose_release(
-    tag: Annotated[str, typer.Option()],
-    target_sha: Annotated[str, typer.Option()],
-    notes: Annotated[str, typer.Option()],
-    spec: Annotated[list[str], typer.Option(help="SPEC-n, repeat the flag")],
-    repo: Annotated[str, typer.Option()],
-    justification: Annotated[str, typer.Option()],
-    ask: Annotated[list[str] | None, typer.Option(help="Ask ids, repeat the flag")] = None,
-    rule: Annotated[str | None, typer.Option()] = None,
-) -> None:
-    from sindarin.propose import build_release, policy_from, render
-
-    try:
-        p = build_release(
-            policy_from(policy_path_from_env()),
-            tag=tag,
-            target_sha=target_sha,
-            notes=notes,
-            specs=spec,
-            asks=ask or [],
-            repo=repo,
-            justification=justification,
-            rule=rule,
-        )
-    except ValueError as exc:
-        _fail(str(exc))
-        return
-    print(render(p))
-
-
-# ---------------------------------------------------------------------------------------------
-# sindarin bootstrap / doctor (DDD §17)
-# ---------------------------------------------------------------------------------------------
+@ledger_app.command("reset")
+def ledger_reset(executor_dir: Annotated[Path | None, typer.Option()] = None) -> None:
+    """Back to the imported data: every period open, no budget recorded."""
+    ledger, data_dir, _ = _ledger(executor_dir)
+    ledger.clear()
+    for folder in sorted(p for p in data_dir.iterdir() if p.is_dir()):
+        if (folder / "sales.csv").exists():
+            print(f"reloaded {folder.name}: {ledger.import_dir(folder)}")
 
 
 @app.command()
@@ -215,23 +222,23 @@ def bootstrap(
     write_ids: Annotated[
         bool, typer.Option(help="Write participant ids into the policy files")
     ] = True,
-    github: Annotated[
-        str | None, typer.Option(help="real | simulated: how sindarin-github reaches GitHub")
-    ] = None,
     addressing: Annotated[
         str, typer.Option(help="rooms | open: Switch addressing policy for the six agents")
     ] = "rooms",
-    mattermost_env: Annotated[
-        Path | None,
+    people: Annotated[
+        str,
         typer.Option(
-            help="A Mattermost server of your own (default: executor/mattermost.env if present)"
+            help="me | cast | both: you alone drive every gate as the Mattermost user account "
+            "Switch's stack hands out (MATTERMOST_USER); cast adds isaac, leonardo, john, vincent "
+            "for the permission demo and the scripted rehearsal"
         ),
-    ] = None,
+    ] = "me",
     repo_root: Annotated[Path | None, typer.Option(help="Repository root (default: auto)")] = None,
 ) -> None:
     """Register the six agents, create the four bridged rooms and the demo people, learn every
     participant id from the event stream, write the policy and executor files, pin an empty
-    board. Idempotent. Never prints a key or a password."""
+    board. A Mattermost server of your own is used when the root .env sets MATTERMOST_URL.
+    Idempotent. Never prints a key or a password."""
     from sindarin.bootstrap import run_bootstrap
 
     stack_env = stack_env or Path.home() / ".sindarin" / "switch-stack" / ".env"
@@ -243,9 +250,8 @@ def bootstrap(
         api_url=api,
         demo_pass=demo_pass,
         write_ids=write_ids,
-        github_mode=github,
         addressing=addressing,
-        mattermost_env=mattermost_env,
+        people=people,
     )
     for line in rep.lines:
         print(line)
@@ -285,7 +291,7 @@ def audit(
     artifact: Annotated[
         str | None, typer.Option(help="Only rows for this SPEC-n / PR-n / REL-n")
     ] = None,
-    executor: Annotated[str, typer.Option(help="switch | github | both")] = "both",
+    executor: Annotated[str, typer.Option(help="switch | ledger | both")] = "both",
     executor_dir: Annotated[
         Path | None, typer.Option(help="Folder holding the state files")
     ] = None,
@@ -295,7 +301,7 @@ def audit(
     from sindarin.store import Store
 
     exec_dir = _exec_dir(executor_dir)
-    shorts = ["switch", "github"] if executor == "both" else [executor]
+    shorts = ["switch", "ledger"] if executor == "both" else [executor]
     rows = []
     for short in shorts:
         _env, cfg = load_executor(exec_dir, short)
@@ -352,51 +358,13 @@ def board(
 
 
 # ---------------------------------------------------------------------------------------------
-# sindarin adapter smoke
-# ---------------------------------------------------------------------------------------------
-
-
-@adapter_app.command("smoke")
-def adapter_smoke(
-    executor_dir: Annotated[Path | None, typer.Option()] = None,
-) -> None:
-    """Read-only GitHub checks for sindarin-github: the repository is visible, the token can
-    push, the base branch is protected. No writes."""
-    from sindarin.adapters.base import AdapterError
-    from sindarin.adapters.github import GitHubAdapter
-    from sindarin.executor.config import load_executor
-    from sindarin.policy import load_policy
-
-    exec_dir = _exec_dir(executor_dir)
-    env, cfg = load_executor(exec_dir, "github")
-    if env.missing("GITHUB_TOKEN"):
-        _fail(f"GITHUB_TOKEN missing in {exec_dir / 'github.env'}")
-    policy = load_policy(cfg.resolve(exec_dir, cfg.policy_path))
-    rules = [r for r in policy.rules if r.repo]
-    if not rules:
-        _fail("policy.yaml has no pr or release rule with a repo")
-    try:
-        gh = GitHubAdapter(env.github_token)
-    except AdapterError as exc:
-        _fail(str(exc))
-        return
-    ok_all = True
-    for repo, base in sorted({(r.repo, r.base) for r in rules}):
-        for name, ok, detail in gh.smoke(repo, base):
-            ok_all &= ok
-            print(f"{'ok  ' if ok else 'FAIL'} {name}: {detail}")
-    gh.close()
-    raise typer.Exit(0 if ok_all else 1)
-
-
-# ---------------------------------------------------------------------------------------------
-# sindarin-exec run --executor switch|github [--probe]
+# sindarin-exec run --executor switch|ledger [--probe]
 # ---------------------------------------------------------------------------------------------
 
 
 @exec_app.command("run")
 def exec_run(
-    executor: Annotated[str, typer.Option(help="switch | github")],
+    executor: Annotated[str, typer.Option(help="switch | ledger")],
     probe: Annotated[
         bool, typer.Option("--probe", help="Connect, print connection_state, answer pings, exit")
     ] = False,
@@ -407,8 +375,8 @@ def exec_run(
     """Run one executor (or its connection probe)."""
     from sindarin.executor.service import run_executor, run_probe
 
-    if executor not in ("switch", "github"):
-        _fail("--executor must be switch or github")
+    if executor not in ("switch", "ledger"):
+        _fail("--executor must be switch or ledger")
     _setup_logging(verbose)
     exec_dir = _exec_dir(executor_dir)
     if probe:
@@ -423,7 +391,7 @@ def exec_run(
 
 @exec_app.command("post")
 def exec_post(
-    executor: Annotated[str, typer.Option(help="switch | github")],
+    executor: Annotated[str, typer.Option(help="switch | ledger")],
     room: Annotated[str, typer.Option(help="Room id")],
     text: Annotated[str, typer.Option()] = "sindarin post test",
     thread: Annotated[str | None, typer.Option(help="Message id to reply to")] = None,
@@ -458,7 +426,7 @@ def exec_version() -> None:
 
 @agent_app.command("run")
 def agent_run(
-    role: Annotated[str, typer.Argument(help="product | coder | reviewer | release")],
+    role: Annotated[str, typer.Argument(help="analyst | planner | bookkeeper")],
     repo_root: Annotated[Path | None, typer.Option(help="Repository root (default: auto)")] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
 ) -> None:
@@ -477,39 +445,39 @@ def agent_run(
 
 @agent_app.command("dry-run")
 def agent_dry_run(
-    role: Annotated[str, typer.Argument(help="product | coder | reviewer | release")],
+    role: Annotated[str, typer.Argument(help="analyst | planner | bookkeeper")],
     text: Annotated[str, typer.Option(help="What the person wrote")],
     sender: Annotated[
         str, typer.Option(help="Sender participant id")
     ] = "@switch-user-demo:localhost",
     name: Annotated[str, typer.Option()] = "Isaac",
-    room: Annotated[str, typer.Option(help="customer | product | releases | feature")] = "customer",
+    room: Annotated[str, typer.Option(help="finance | planning | period")] = "finance",
     repo_root: Annotated[Path | None, typer.Option()] = None,
 ) -> None:
     """One model turn without Switch: prints what the agent would post and where."""
     from sindarin.agents.base import ScriptedModel, Turn, anthropic_model_call, is_fake_model
     from sindarin.agents.roles import RoleContext, build_agent
-    from sindarin.agents.service import ROLES, github_for
-    from sindarin.executor.config import load_env
+    from sindarin.agents.service import ROLES, ledger_for
+    from sindarin.executor.config import process_env
     from sindarin.policy import load_policy
     from sindarin.switch.events import MessageEvent
 
     if role not in ROLES:
         _fail(f"unknown role {role!r}; one of {', '.join(AGENT_ROLES)}")
     root = _root(repo_root)
-    values = load_env(root / "agents" / role / ".env", env_override=False)
+    values = process_env(root, role)
     if values.get("ANTHROPIC_API_KEY"):
         os.environ.setdefault("ANTHROPIC_API_KEY", values["ANTHROPIC_API_KEY"])
     policy_path = root / "agents" / "policy" / "policy.yaml"
     policy = load_policy(policy_path)
-    room_id = policy.room_id(room) if room != "feature" else "!room-feature:dry-run"
+    room_id = policy.room_id(room) if room != "period" else "!room-period:dry-run"
     ctx = RoleContext(
         role=role,
         repo_root=root,
         policy_path=policy_path,
         users_path=root / "agents" / "policy" / "users.yaml",
         self_id=policy.proposer_id(role) or f"@switch-agent-{role}:dry-run",
-        github=github_for(role, root, values),
+        ledger=ledger_for(root),
     )
     module = ROLES[role]
     model_call = ScriptedModel(module.fake_step(ctx)) if is_fake_model() else anthropic_model_call()

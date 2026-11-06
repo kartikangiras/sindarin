@@ -1,52 +1,48 @@
-# Sindarin policy (DDD §10.1). Agents draft from it; both executors enforce it.
+# Sindarin policy (design v5 §6). Agents draft from it; both executors enforce it.
 # Every id is a Switch participant id; nothing in this file is a display name.
 # `sindarin bootstrap` writes the ids and room ids. Learn yours with "@sindarin-switch whoami".
-version: 2
+version: 3
 
 groups:
-  pm: ["@switch-mattermost-2f2d15ce-de63-4dbf-9c7e-ca96f01b38cd-leonardo:localhost"]            # Leonardo
-  engineering: ["@switch-mattermost-2f2d15ce-de63-4dbf-9c7e-ca96f01b38cd-isaac:localhost"]            # Isaac
-  release: ["@switch-mattermost-2f2d15ce-de63-4dbf-9c7e-ca96f01b38cd-john:localhost"]            # John
-  # Vincent is in no group: used for refusals in the demo (§3.2)
+  cfo: ["@switch-mattermost-b76af5d9-670f-4573-9f7b-6655cdb00753-user:localhost"]            # User
+  controllers: ["@switch-mattermost-b76af5d9-670f-4573-9f7b-6655cdb00753-user:localhost"]            # User
+  board: ["@switch-mattermost-b76af5d9-670f-4573-9f7b-6655cdb00753-user:localhost"]            # User
 
 proposers:
-  product: "@switch-agent-ca7d6fcc:localhost"
-  coder: "@switch-agent-f58c91b6:localhost"
-  reviewer: "@switch-agent-88d97995:localhost"
-  release: "@switch-agent-b873dc53:localhost"
+  analyst: "@switch-agent-cc9230bb:localhost"
+  planner: "@switch-agent-339ae16b:localhost"
+  bookkeeper: "@switch-agent-9648f6fe:localhost"
 
 executors:
   sindarin-switch: "@switch-agent-99c39840:localhost"
-  sindarin-github: "@switch-agent-515b9070:localhost"
+  sindarin-ledger: "@switch-agent-fe792a08:localhost"
 
 rooms:
-  product: "e86bd099-0fab-4671-a25d-d84211b30b17"
-  releases: "c83ccbec-24a9-4052-b5cb-2bc6013f8097"
-  customer: "c383cfb1-4c52-4182-b055-00416be7a720"
+  finance: "02e11ed7-ac78-4028-b561-d00c7a23573a"
+  planning: "cf304b00-a572-49af-bfa7-7aea2bafbb5c"
 
 rules:
-  - name: spec
-    kind: spec
-    proposer: product
-    approvers: pm
-    room: product
-    allowed_repos: ["kartikangiras/sindarin-demo-app"]
-    engineers: engineering
+  - name: goals
+    kind: goals
+    proposer: planner
+    approvers: cfo
+    also_invite: controllers  # sit in the plan room too
+    room: finance
+    currency: USD
     pending_ttl: 24h
-  - name: merge
-    kind: pr
-    proposer: coder
-    approvers: engineering
-    room: feature            # the artifact's own feature room
-    repo: "kartikangiras/sindarin-demo-app"
-    base: main
-    merge_method: squash
+  - name: budget
+    kind: budget
+    proposer: planner
+    approvers: board
+    approvers_under_limit: cfo
+    limit_cents: 1000000      # 10,000.00 USD: up to it the cfo approves alone
+    room: planning
+    currency: USD
     pending_ttl: 24h
-  - name: release
-    kind: release
-    proposer: release
-    approvers: release
-    room: releases
-    repo: "kartikangiras/sindarin-demo-app"
-    tag_pattern: "^v\\d+\\.\\d+\\.\\d+$"
+  - name: entries
+    kind: entries
+    proposer: bookkeeper
+    approvers: controllers
+    room: period             # the plan room the goals opened
+    currency: USD
     pending_ttl: 24h

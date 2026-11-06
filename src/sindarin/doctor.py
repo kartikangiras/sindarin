@@ -10,7 +10,7 @@ from pathlib import Path
 
 import httpx
 
-from sindarin.executor.config import load_env, load_executor, parse_env_text
+from sindarin.executor.config import PROCESSES, load_executor, parse_env_text, process_env
 from sindarin.names import AGENT_ROLES
 
 
@@ -61,14 +61,10 @@ def run_doctor(repo: Path, stack_env: Path) -> list[Check]:
             Check("switch", False, f"no stack env at {stack_env}", "scripts/switch_stack.sh up")
         )
     missing_keys = []
-    for role in AGENT_ROLES:
-        v = load_env(repo / "agents" / role / ".env", env_override=False)
+    for process in PROCESSES:
+        v = process_env(repo, process)
         if not (v.get("SWITCH_AGENT_ID") and v.get("SWITCH_AGENT_API_KEY")):
-            missing_keys.append(role)
-    for short in ("switch", "github"):
-        v = load_env(repo / "executor" / f"{short}.env", env_override=False)
-        if not (v.get("SWITCH_AGENT_ID") and v.get("SWITCH_AGENT_API_KEY")):
-            missing_keys.append(f"sindarin-{short}")
+            missing_keys.append(process)
     out.append(
         Check(
             "agents registered",
@@ -87,7 +83,7 @@ def run_doctor(repo: Path, stack_env: Path) -> list[Check]:
             "uv run sindarin bootstrap",
         )
     )
-    for short in ("switch", "github"):
+    for short in ("switch", "ledger"):
         env, cfg = load_executor(repo / "executor", short)
         out.append(
             Check(
@@ -108,24 +104,16 @@ def run_doctor(repo: Path, stack_env: Path) -> list[Check]:
                 )
             )
         else:
-            if cfg.github_mode == "simulated":
-                out.append(Check("github", True, "simulated (no token needed)", ""))
-            else:
-                has = bool(env.github_token)
-                out.append(
-                    Check(
-                        "github token",
-                        has,
-                        "present" if has else "GITHUB_TOKEN empty",
-                        "put a PAT in executor/github.env, or set github_mode: simulated in "
-                        "executor/github.yaml",
-                    )
+            ledger = cfg.resolve(repo / "executor", cfg.ledger_db)
+            out.append(
+                Check(
+                    "ledger",
+                    ledger.exists(),
+                    str(ledger) if ledger.exists() else f"{ledger} missing",
+                    "uv run sindarin ledger import",
                 )
-    keys = [
-        role
-        for role in AGENT_ROLES
-        if load_env(repo / "agents" / role / ".env", env_override=False).get("ANTHROPIC_API_KEY")
-    ]
+            )
+    keys = [role for role in AGENT_ROLES if process_env(repo, role).get("ANTHROPIC_API_KEY")]
     out.append(
         Check(
             "model key",
@@ -133,12 +121,12 @@ def run_doctor(repo: Path, stack_env: Path) -> list[Check]:
             f"ANTHROPIC_API_KEY present for {', '.join(keys)}"
             if keys
             else "none: use SINDARIN_MODEL=fake (stand-in)",
-            "" if keys else "add ANTHROPIC_API_KEY to agents/<role>/.env for Claude",
+            "" if keys else "add ANTHROPIC_API_KEY to .env for Claude",
         )
     )
     procs = [
         ("sindarin-switch", "sindarin-exec run --executor switch"),
-        ("sindarin-github", "sindarin-exec run --executor github"),
+        ("sindarin-ledger", "sindarin-exec run --executor ledger"),
     ]
     procs += [(role, f"sindarin-agent run {role}") for role in AGENT_ROLES]
     for name, pat in procs:

@@ -1,0 +1,9 @@
+code,name,type
+1000,Cash,asset
+1100,Accounts receivable,asset
+1500,Accumulated depreciation,asset
+2100,Accrued liabilities,liability
+4000,Revenue,revenue
+6000,Operating expenses,expense
+6100,Depreciation,expense
+6200,Payroll,expense

@@ -1,0 +1,4 @@
+invoice,vendor,amount_cents,due
+INV-1042,Amazon Web Services,480000,2026-10-31
+INV-1043,Figma,145000,2026-10-28
+INV-1044,WeWork,800000,2026-10-31

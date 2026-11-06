@@ -8,12 +8,10 @@ __pycache__/
 build/
 dist/
 .DS_Store
+# secrets and local state (DDD §16.2): one env file for the six processes, one state file per executor
 /.env
 .env.local
-# secrets and local state (DDD §16.2): one env file per process, one state file per executor
-agents/*/.env
 agents/*/.claude/
-executor/*.env
 executor/*.db
 executor/*.db-journal
 executor/*.db-shm

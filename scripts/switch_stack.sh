@@ -42,6 +42,11 @@ case "$cmd" in
     fi
     # an older stack env may still carry the v2 feature flag; the documented path does not need it
     sed -i.bak 's|^FEATURE_FLAGS_ENABLED=agent_chats$|FEATURE_FLAGS_ENABLED=|' "$STACK_DIR/.env" && rm -f "$STACK_DIR/.env.bak"
+    # Switch refuses outbound calls to private addresses unless listed; a Mattermost of your own
+    # running on this machine is reached as host.docker.internal (MATTERMOST_INTERNAL_URL in .env)
+    if ! grep -qE '^OUTBOUND_ALLOWED_PRIVATE_HOSTS=.*host\.docker\.internal' "$STACK_DIR/.env"; then
+      sed -i.bak 's|^OUTBOUND_ALLOWED_PRIVATE_HOSTS=\(.*\)$|OUTBOUND_ALLOWED_PRIVATE_HOSTS=\1,host.docker.internal|' "$STACK_DIR/.env" && rm -f "$STACK_DIR/.env.bak"
+    fi
     for p in 8000 3000 8065 "$POSTGRES_HOST_PORT"; do
       if lsof -nP -iTCP:"$p" -sTCP:LISTEN >/dev/null 2>&1; then echo "port $p is busy; override it in $STACK_DIR/.env" >&2; fi
     done

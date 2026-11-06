@@ -8,11 +8,11 @@ bootstrap, then checks, through Mattermost and the Gateway:
   3. an executor's threaded reply renders as a Mattermost thread (root_id set)
   4. room creation through the Gateway route: the bootstrap's bridged probe room has both
      executors as members and a Mattermost channel; feature rooms opened so far are listed
-  5. room-scoped addressing: sindarin-github scoped to #releases, a mention from a feature room
+  5. room-scoped addressing: sindarin-ledger scoped to #planning, a mention from a period room
      still arrives (addressed=False) and Switch refuses it in the room; the policy is restored
 
 Items 1–3 need the two executors running (`scripts/dev_stack.sh start`): Isaac types
-`@sindarin-switch whoami` in #product and `@sindarin-github whoami` in #releases, and the replies
+`@sindarin-switch whoami` in #acme-finance and `@sindarin-ledger whoami` in #planning, and the replies
 are read back from Mattermost. Writes docs/SPIKE-RUN.md. Never prints a key or a password.
 
     uv run python scripts/spike.py [--stack-env ~/.sindarin/switch-stack/.env] [--no-bootstrap]
@@ -34,8 +34,8 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
 
 from sindarin.bootstrap import MattermostTarget, run_bootstrap  # noqa: E402
-from sindarin.executor.config import load_env, parse_env_text  # noqa: E402
-from sindarin.names import GITHUB_EXECUTOR, SWITCH_EXECUTOR  # noqa: E402
+from sindarin.executor.config import parse_env_text, process_env  # noqa: E402
+from sindarin.names import LEDGER_EXECUTOR, SWITCH_EXECUTOR  # noqa: E402
 from sindarin.switch.gateway import GatewayClient, GatewayError  # noqa: E402
 from sindarin.switch.mattermost import MattermostClient, MattermostError  # noqa: E402
 
@@ -48,7 +48,7 @@ def executors_running() -> bool:
             ["pgrep", "-f", f"sindarin-exec run --executor {s}"], capture_output=True
         ).returncode
         == 0
-        for s in ("switch", "github")
+        for s in ("switch", "ledger")
     )
 
 
@@ -80,19 +80,13 @@ def main() -> int:
     p.add_argument("--api", default=None)
     p.add_argument("--demo-pass", default="Sindarin-demo-1")
     p.add_argument("--no-bootstrap", action="store_true")
-    p.add_argument(
-        "--mattermost-env",
-        type=Path,
-        default=None,
-        help="a Mattermost server of your own (default: executor/mattermost.env if present)",
-    )
     p.add_argument("--report", type=Path, default=REPO / "docs" / "SPIKE-RUN.md")
     a = p.parse_args()
     lines: list[str] = []
     ok = True
     stack = parse_env_text(a.stack_env.read_text())
     api = (a.api or f"http://localhost:{stack.get('API_HOST_PORT') or '8000'}").rstrip("/")
-    target = MattermostTarget.resolve(REPO, stack, mattermost_env=a.mattermost_env)
+    target = MattermostTarget.resolve(REPO, stack)
     mm_url = target.url
     lines.append(f"mattermost: {mm_url} team {target.team_name}")
     if not a.no_bootstrap:
@@ -101,12 +95,12 @@ def main() -> int:
             a.stack_env,
             api_url=a.api,
             demo_pass=a.demo_pass,
-            mattermost_env=a.mattermost_env,
+            people="both",  # the spike posts as isaac and vincent
         )
         lines += [line if line.startswith("FAIL") else "PASS " + line for line in rep.lines]
         ok &= rep.ok
-    sw = load_env(REPO / "executor" / "switch.env", env_override=False)
-    gh = load_env(REPO / "executor" / "github.env", env_override=False)
+    sw = process_env(REPO, SWITCH_EXECUTOR)
+    gh = process_env(REPO, LEDGER_EXECUTOR)
     import yaml
 
     policy = yaml.safe_load((REPO / "agents" / "policy" / "policy.yaml").read_text())
@@ -123,7 +117,10 @@ def main() -> int:
             team = mm_admin.team_by_name(target.team_name)["id"]
             isaac = MattermostClient.login(mm_url, "isaac@sindarin.local", a.demo_pass)
             ids: dict[str, str] = {}
-            for handle, room_name in ((SWITCH_EXECUTOR, "product"), (GITHUB_EXECUTOR, "releases")):
+            for handle, room_name in (
+                (SWITCH_EXECUTOR, "acme-finance"),
+                (LEDGER_EXECUTOR, "planning"),
+            ):
                 ch = mm_admin.channel_by_name(team, room_name)
                 if ch is None:
                     lines.append(f"FAIL item 1: Mattermost channel {room_name} not found")
@@ -182,7 +179,7 @@ def main() -> int:
         feats = [
             r["name"]
             for r in admin.list_rooms()
-            if str(r.get("name", "")).startswith("feat-") and not r.get("archived")
+            if str(r.get("name", "")).startswith("plan-") and not r.get("archived")
         ]
         lines.append(
             f"INFO item 4: feature rooms opened by {SWITCH_EXECUTOR} so far: {feats or 'none'}"
@@ -193,7 +190,7 @@ def main() -> int:
             f"FAIL item 4: {exc} → fallback §20: bootstrap pre-creates rooms; sindarin-switch adds members"
         )
         ok = False
-    # 5: room-scoped addressing. Restrict sindarin-github to #releases, have Vincent mention it in
+    # 5: room-scoped addressing. Restrict sindarin-ledger to #planning, have Vincent mention it in
     # a feature room it belongs to, read the executor's frame and Switch's reply, restore.
     if not executors_running():
         lines.append("SKIP item 5: needs the executors running")
@@ -208,7 +205,7 @@ def main() -> int:
                 (
                     r
                     for r in admin.list_rooms()
-                    if str(r.get("name", "")).startswith("feat-") and not r.get("archived")
+                    if str(r.get("name", "")).startswith("plan-") and not r.get("archived")
                 ),
                 None,
             )
@@ -226,11 +223,11 @@ def main() -> int:
                 with contextlib.suppress(MattermostError):
                     mm_admin.add_to_channel(channel["id"], vincent.user["id"])
                 before = admin.addressing_rooms(gh["SWITCH_AGENT_ID"])
-                log_path = REPO / "executor" / "sindarin-github.log"
+                log_path = REPO / "executor" / "sindarin-ledger.log"
                 try:
-                    admin.set_addressing_rooms(gh["SWITCH_AGENT_ID"], [rooms["releases"]])
+                    admin.set_addressing_rooms(gh["SWITCH_AGENT_ID"], [rooms["planning"]])
                     mark = log_path.read_text() if log_path.exists() else ""
-                    post = vincent.create_post(channel["id"], f"@{GITHUB_EXECUTOR} whoami")
+                    post = vincent.create_post(channel["id"], f"@{LEDGER_EXECUTOR} whoami")
                     time.sleep(8)
                     tail = (log_path.read_text() if log_path.exists() else "")[len(mark) :]
                     frame = next(
@@ -245,7 +242,7 @@ def main() -> int:
                     )
                     passed = delivered and unaddressed and refusal
                     lines.append(
-                        f"{'PASS' if passed else 'FAIL'} item 5: with {GITHUB_EXECUTOR} scoped to #releases, Vincent's mention in "
+                        f"{'PASS' if passed else 'FAIL'} item 5: with {LEDGER_EXECUTOR} scoped to #planning, Vincent's mention in "
                         f"#{feat['name']} reached the executor: {delivered}, addressed=False: {unaddressed}, Switch refused in the room: {refusal} "
                         "→ decision: room-scoped policies (bootstrap --addressing rooms), typed refusals kept inside the rooms"
                     )
