@@ -12,12 +12,12 @@ def test_template_instructions_match_agent_md(repo_root):
     data = yaml.safe_load((repo_root / "templates" / "sindarin.template.yaml").read_text())
     assert data["version"] == 1
     by_name = {a["name"]: a for a in data["agents"]}
-    assert set(by_name) == {"analyst", "planner", "bookkeeper"}
+    assert set(by_name) == {"analyst", "planner", "bookkeeper", "treasury", "sales"}
     for role, agent in by_name.items():
         agent_md = (repo_root / "agents" / role / "AGENT.md").read_text().rstrip("\n")
         assert agent["instructions"].rstrip("\n") == agent_md, role
     names = [r["name"] for r in data["rooms"]]
-    assert names == ["{team}-acme-finance", "{team}-planning"]
+    assert names == ["{team}-acme-finance", "{team}-planning", "{team}-payments", "{team}-sales"]
     assert data["params"]["switch_executor"]["type"] == "agent"
     assert data["params"]["ledger_executor"]["type"] == "agent"
 

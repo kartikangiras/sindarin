@@ -47,7 +47,20 @@ def test_fixture_policy_loads_and_resolves():
     assert p.in_group(ISAAC, "board") and p.groups_of(VINCENT) == []
     assert p.proposer_id("planner") == PLANNER_AGENT and p.role_of(BOOKKEEPER_AGENT) == "bookkeeper"
     assert p.executor_of("@switch-agent-sindarin-ledger:test") == "sindarin-ledger"
-    assert [r.kind for r in p.rules] == [Kind.GOALS, Kind.BUDGET, Kind.ENTRIES]
+    assert [r.kind for r in p.rules] == [
+        Kind.GOALS,
+        Kind.BUDGET,
+        Kind.ENTRIES,
+        Kind.CLOSE,
+        Kind.PAY,
+        Kind.LOCK,
+        Kind.DEAL,
+    ]
+    pay = p.rule("pay")
+    assert pay.approver_groups(1425000) == ["cfo"] and pay.approver_groups(625000) == [
+        "cfo",
+        "controllers",
+    ]
     budget = p.rule("budget")
     assert budget.approver_groups(1600000) == ["board"]
     assert budget.approver_groups(880000) == ["board", "cfo"]
@@ -72,22 +85,22 @@ def _data(mutate):
 
 
 def test_rules_are_validated():
-    with pytest.raises(ValidationError, match="approved in the plan room"):
+    with pytest.raises(ValidationError, match="approved in the room the chain opened"):
         Policy.model_validate(_data(lambda d: d["rules"][2].__setitem__("room", "planning")))
     with pytest.raises(ValidationError, match="named room"):
         Policy.model_validate(_data(lambda d: d["rules"][0].__setitem__("room", "period")))
     with pytest.raises(ValidationError, match="go together"):
         Policy.model_validate(_data(lambda d: d["rules"][1].pop("approvers_under_limit")))
-    with pytest.raises(ValidationError, match="only a budget rule has a limit"):
+    with pytest.raises(ValidationError, match="only a budget, pay or deal rule has a limit"):
         Policy.model_validate(
             _data(lambda d: d["rules"][2].update(limit_cents=1, approvers_under_limit="cfo"))
         )
     with pytest.raises(ValidationError, match="is not defined"):
         Policy.model_validate(_data(lambda d: d["rules"][0].__setitem__("also_invite", "exec")))
     with pytest.raises(ValidationError, match="unknown room key"):
-        Policy.model_validate(_data(lambda d: d["rooms"].__setitem__("payments", "!x:t")))
+        Policy.model_validate(_data(lambda d: d["rooms"].__setitem__("vendors", "!x:t")))
     with pytest.raises(ValidationError, match="unknown proposer role"):
-        Policy.model_validate(_data(lambda d: d["proposers"].__setitem__("treasury", "@c:t")))
+        Policy.model_validate(_data(lambda d: d["proposers"].__setitem__("coder", "@c:t")))
     with pytest.raises(ValidationError, match="currency"):
         Policy.model_validate(_data(lambda d: d["rules"][1].__setitem__("currency", "XYZ")))
 

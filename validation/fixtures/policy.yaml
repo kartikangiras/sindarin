@@ -11,6 +11,8 @@ proposers:
   analyst: "@switch-agent-analyst:test"
   planner: "@switch-agent-planner:test"
   bookkeeper: "@switch-agent-bookkeeper:test"
+  treasury: "@switch-agent-treasury:test"
+  sales: "@switch-agent-sales:test"
 
 executors:
   sindarin-switch: "@switch-agent-sindarin-switch:test"
@@ -19,6 +21,8 @@ executors:
 rooms:
   finance: "!room-acme-finance:test"
   planning: "!room-planning:test"
+  payments: "!room-payments:test"
+  sales: "!room-sales:test"
 
 rules:
   - name: goals
@@ -43,5 +47,38 @@ rules:
     proposer: bookkeeper
     approvers: controllers
     room: period
+    currency: USD
+    pending_ttl: 24h
+  - name: close
+    kind: close
+    proposer: bookkeeper
+    approvers: controllers
+    also_invite: cfo
+    room: finance
+    currency: USD
+    pending_ttl: 24h
+  - name: pay
+    kind: pay
+    proposer: treasury
+    approvers: cfo
+    approvers_under_limit: controllers
+    limit_cents: 1000000
+    room: payments
+    currency: USD
+    pending_ttl: 24h
+  - name: lock
+    kind: lock
+    proposer: bookkeeper
+    approvers: controllers
+    room: period
+    currency: USD
+    pending_ttl: 24h
+  - name: deal
+    kind: deal
+    proposer: sales
+    approvers: cfo
+    approvers_under_limit: controllers
+    limit_cents: 100000
+    room: sales
     currency: USD
     pending_ttl: 24h

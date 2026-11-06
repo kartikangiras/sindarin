@@ -146,7 +146,7 @@ def test_status_board_pointer_and_board(harness: Harness):
     fx = h.command("s3", "status GOALS-1", sender=JOHN, room=FINANCE, executor=SWITCH_EXECUTOR)
     assert _text(fx).startswith("**GOALS-1** · open · Plan November 2026")
     assert _text(h.command("s4", "board", sender=JOHN, room=PLANNING)) == (
-        "The board is kept by @sindarin-switch in #acme-finance."
+        "The board is kept by sindarin-switch in #acme-finance."
     )
     h.propose_budget()
     fx = h.command("s5", "board", sender=JOHN, room=FINANCE, executor=SWITCH_EXECUTOR)
@@ -348,6 +348,26 @@ def test_crash_recovery(harness: Harness):
     assert any("approved by Isaac · recorded 16,000.00 USD" in p.text for p in _posts(fx))
     events = h.audit_events()
     assert "recovery_resume" in events and "recovery_execute" in events
+
+
+def test_sale_command_is_a_persons_event_on_the_books(harness: Harness):
+    h = harness
+    fx = h.command("sale-1", "sale S-2026-1055 3980.00 Contoso Ltd", sender=JOHN, room=PLANNING)
+    assert _text(fx).startswith("**S-2026-1055** Contoso Ltd 3,980.00 USD landed in 2026-10")
+    assert h.books.sales("2026-10")[-1]["invoice"] == "S-2026-1055"
+    fx = h.command(
+        "sale-2", "sale S-2026-1056 10.00 Contoso Ltd", sender=PLANNER_AGENT, room=PLANNING
+    )
+    assert (
+        _text(fx)
+        == "**S-2026-1056** not booked — @planner is an agent; a sale lands from a person."
+    )
+    fx = h.command(
+        "sale-3", "sale S-2026-1057 10.00 X", sender=JOHN, room=FINANCE, executor=SWITCH_EXECUTOR
+    )
+    assert _text(fx).startswith("The books are kept by sindarin-ledger")
+    fx = h.command("sale-4", "sale S-2026-1058 0 X", sender=JOHN, room=PLANNING)
+    assert _text(fx) == "**S-2026-1058** not booked — the amount must be positive."
 
 
 def test_finance_room_has_no_ledger_executor(harness: Harness):

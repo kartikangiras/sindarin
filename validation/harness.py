@@ -14,14 +14,28 @@ import pytest
 import yaml
 
 from sindarin.adapters.fake import FakeSwitchRooms
-from sindarin.adapters.ledger import LedgerAdapter
-from sindarin.agents.finance import plan_goals, report_lines, standard_budget_lines
+from sindarin.adapters.ledger import LedgerAdapter, deal_facts
+from sindarin.agents.finance import (
+    plan_goals,
+    report_lines,
+    standard_budget_lines,
+    standard_entries,
+)
 from sindarin.executor import core
 from sindarin.executor.runner import Effector, RunnerConfig
 from sindarin.ledger import Ledger
 from sindarin.names import LEDGER_EXECUTOR, SWITCH_EXECUTOR
 from sindarin.policy import load_policy
-from sindarin.propose import build_budget, build_entries, build_goals, render
+from sindarin.propose import (
+    build_budget,
+    build_close,
+    build_deal,
+    build_entries,
+    build_goals,
+    build_lock,
+    build_pay,
+    render,
+)
 from sindarin.schema import Artifact, Proposal, canonical_json, is_status_fence
 from sindarin.store import Store
 from sindarin.switch.events import MessageEvent, message_envelope, parse_frame
@@ -36,8 +50,11 @@ BASIS = "2026-10"  # the month in the books
 PERIOD = "2026-11"  # the month being planned
 FINANCE = "!room-acme-finance:test"
 PLANNING = "!room-planning:test"
+PAYMENTS = "!room-payments:test"
+SALES_ROOM = "!room-sales:test"
 PERIOD_ROOM = f"!room-plan-{PERIOD}:test"  # what FakeSwitchRooms names the room it opens
-ASK = "m-ask-1"  # the business's ask: the thread the goals live in
+CLOSE_ROOM = f"!room-close-{BASIS}:test"  # the period room the month's plan opens
+ASK = "m-ask-1"  # the business's ask: the thread the goals (or the plan) live in
 
 ISAAC = "@switch-user-isaac:test"
 LEONARDO = "@switch-user-leonardo:test"
@@ -46,6 +63,8 @@ VINCENT = "@switch-user-vincent:test"
 ANALYST_AGENT = "@switch-agent-analyst:test"
 PLANNER_AGENT = "@switch-agent-planner:test"
 BOOKKEEPER_AGENT = "@switch-agent-bookkeeper:test"
+TREASURY_AGENT = "@switch-agent-treasury:test"
+SALES_AGENT = "@switch-agent-sales:test"
 SWITCH_EXEC = "@switch-agent-sindarin-switch:test"
 LEDGER_EXEC = "@switch-agent-sindarin-ledger:test"
 NAMES = {
@@ -56,6 +75,8 @@ NAMES = {
     ANALYST_AGENT: "analyst",
     PLANNER_AGENT: "planner",
     BOOKKEEPER_AGENT: "bookkeeper",
+    TREASURY_AGENT: "treasury",
+    SALES_AGENT: "sales",
     SWITCH_EXEC: SWITCH_EXECUTOR,
     LEDGER_EXEC: LEDGER_EXECUTOR,
 }
@@ -63,12 +84,18 @@ ROOM_NAMES = {
     FINANCE: "#acme-finance",
     PLANNING: "#planning",
     PERIOD_ROOM: f"#plan-{PERIOD}",
+    PAYMENTS: "#payments",
+    CLOSE_ROOM: f"#close-{BASIS}",
+    SALES_ROOM: "#sales",
 }
 # which executor is a member of which room (Switch delivers events to members only)
 MEMBERS = {
     FINANCE: (SWITCH_EXECUTOR,),
     PLANNING: (LEDGER_EXECUTOR,),
     PERIOD_ROOM: (LEDGER_EXECUTOR, SWITCH_EXECUTOR),
+    PAYMENTS: (LEDGER_EXECUTOR,),
+    CLOSE_ROOM: (LEDGER_EXECUTOR, SWITCH_EXECUTOR),
+    SALES_ROOM: (LEDGER_EXECUTOR,),
 }
 
 T0 = datetime(2026, 11, 5, 12, 0, 0, tzinfo=UTC)
@@ -185,6 +212,122 @@ def entries_proposal(
         lines=lines,
         memo=memo,
         digest=Ledger.budget_digest(rows) if digest else "",
+        justification=justification,
+        rule=rule,
+    )
+
+
+def close_proposal(
+    books: Ledger,
+    *,
+    period: str = BASIS,
+    title: str = "Close October 2026",
+    summary: str = "October closes with the standard accruals.",
+    ask: str = ASK,
+    justification: str = "the business asked for the close",
+    payables: list[str] | None = None,
+    entries: list[dict[str, Any]] | None = None,
+    total_cents: int | None = None,
+    rule: str | None = None,
+) -> Proposal:
+    s = books.summary(period)
+    open_rows = [r for r in s["payables"] if r["status"] == "open"]
+    invoices = [r["invoice"] for r in open_rows] if payables is None else payables
+    rows = {r["invoice"]: int(r["amount_cents"]) for r in books.payables(invoices)}
+    return build_close(
+        POLICY,
+        period=period,
+        title=title,
+        summary=summary,
+        report=report_lines(s),
+        entries=standard_entries(books, period) if entries is None else entries,
+        payables=invoices,
+        total_payables_cents=sum(rows.values()) if total_cents is None else total_cents,
+        ask=ask,
+        justification=justification,
+        rule=rule,
+    )
+
+
+def pay_proposal(
+    books: Ledger,
+    *,
+    period: str = BASIS,
+    plan: str = "CLOSE-1",
+    invoices: list[str] | None = None,
+    run: list[dict[str, Any]] | None = None,
+    justification: str = "the approved plan names these payables",
+    digest: bool = True,
+    rule: str | None = None,
+) -> Proposal:
+    rows = books.payables(invoices) if invoices is not None else books.open_payables(period)
+    return build_pay(
+        POLICY,
+        period=period,
+        plan=plan,
+        run=run
+        if run is not None
+        else [
+            {"invoice": r["invoice"], "vendor": r["vendor"], "amount_cents": int(r["amount_cents"])}
+            for r in rows
+        ],
+        digest=Ledger.payables_digest(rows) if digest and run is None else "",
+        justification=justification,
+        rule=rule,
+    )
+
+
+def lock_proposal(
+    books: Ledger,
+    *,
+    period: str = BASIS,
+    plan: str = "CLOSE-1",
+    pay_run: str = "PAY-1",
+    memo: str = "Close October 2026",
+    justification: str = "payment run paid; entries computed from the ledger",
+    entries: list[dict[str, Any]] | None = None,
+    digest: bool = True,
+    rule: str | None = None,
+) -> Proposal:
+    return build_lock(
+        POLICY,
+        period=period,
+        plan=plan,
+        pay_run=pay_run,
+        entries=standard_entries(books, period) if entries is None else entries,
+        memo=memo,
+        digest=Ledger.balance_digest(books.trial_balance(period)) if digest else "",
+        justification=justification,
+        rule=rule,
+    )
+
+
+def deal_proposal(
+    books: Ledger,
+    *,
+    period: str = PERIOD,
+    deal_id: str = "D-2026-01",
+    account: str = "Contoso Ltd",
+    product: str = "Team",
+    price_cents: int = 1020000,
+    list_cents: int | None = None,
+    terms: str = "standard",
+    justification: str = "the deal as asked, priced against the price book",
+    digest: bool = True,
+    rule: str | None = None,
+) -> Proposal:
+    lst = list_cents if list_cents is not None else int(books.price_book().get(product, 0))
+    facts = deal_facts(books, period, product, deal_id, lst - price_cents) if digest else {}
+    return build_deal(
+        POLICY,
+        period=period,
+        deal_id=deal_id,
+        account=account,
+        product=product,
+        list_cents=lst,
+        price_cents=price_cents,
+        terms=terms,
+        digest=str(facts.get("digest", "")),
         justification=justification,
         rule=rule,
     )
@@ -331,6 +474,117 @@ class Harness:
         thread: str | None = "m-entries-1",
     ) -> list[core.Effect]:
         return self.command(mid, f"approve {aid}", sender=sender, room=room, thread=thread)
+
+    # -- the month-end chain ----------------------------------------------------------------
+
+    def propose_close(self, mid: str = "m-close-1", **kw: Any) -> list[core.Effect]:
+        text = proposal_text(close_proposal(self.books, **kw))
+        return self.say(FINANCE, BOOKKEEPER_AGENT, text, mid=mid, thread=kw.get("ask", ASK))
+
+    def approve_close(
+        self, mid: str = "m-approve-close", *, sender: str = LEONARDO, aid: str = "CLOSE-1"
+    ) -> list[core.Effect]:
+        return self.command(
+            mid, f"approve {aid}", sender=sender, room=FINANCE, executor=SWITCH_EXECUTOR, thread=ASK
+        )
+
+    def propose_pay(
+        self, mid: str = "m-pay-1", *, room: str = PAYMENTS, thread: str | None = None, **kw: Any
+    ) -> list[core.Effect]:
+        return self.say(
+            room,
+            TREASURY_AGENT,
+            proposal_text(pay_proposal(self.books, **kw)),
+            mid=mid,
+            thread=thread,
+        )
+
+    def approve_pay(
+        self,
+        mid: str = "m-approve-pay",
+        *,
+        sender: str = JOHN,
+        aid: str = "PAY-1",
+        room: str = PAYMENTS,
+        thread: str | None = "m-pay-1",
+    ) -> list[core.Effect]:
+        return self.command(mid, f"approve {aid}", sender=sender, room=room, thread=thread)
+
+    def propose_lock(
+        self, mid: str = "m-lock-1", *, room: str = CLOSE_ROOM, **kw: Any
+    ) -> list[core.Effect]:
+        return self.say(
+            room, BOOKKEEPER_AGENT, proposal_text(lock_proposal(self.books, **kw)), mid=mid
+        )
+
+    def approve_lock(
+        self,
+        mid: str = "m-approve-lock",
+        *,
+        sender: str = LEONARDO,
+        aid: str = "LOCK-1",
+        room: str = CLOSE_ROOM,
+        thread: str | None = "m-lock-1",
+    ) -> list[core.Effect]:
+        return self.command(mid, f"approve {aid}", sender=sender, room=room, thread=thread)
+
+    # -- the sales chain (one gate) ---------------------------------------------------------
+
+    def propose_deal(
+        self, mid: str = "m-deal-1", *, thread: str | None = None, **kw: Any
+    ) -> list[core.Effect]:
+        return self.say(
+            SALES_ROOM,
+            SALES_AGENT,
+            proposal_text(deal_proposal(self.books, **kw)),
+            mid=mid,
+            thread=thread,
+        )
+
+    def approve_deal(
+        self,
+        mid: str = "m-approve-deal",
+        *,
+        sender: str = JOHN,
+        aid: str = "DEAL-1",
+        room: str = SALES_ROOM,
+        thread: str | None = "m-deal-1",
+    ) -> list[core.Effect]:
+        return self.command(mid, f"approve {aid}", sender=sender, room=room, thread=thread)
+
+    def deal(self, aid: str = "DEAL-1") -> Artifact | None:
+        return self.ledger.store.get(aid)
+
+    def won(self, period: str = PERIOD) -> list[str]:
+        return [d["id"] for d in self.books.deals(period) if d["stage"] == "won"]
+
+    def run_plan_gate(self) -> Artifact:
+        self.propose_close()
+        self.approve_close()
+        self.sweep("sweep: stage lines")
+        a = self.plan()
+        assert a is not None and a.state.value == "open", a
+        return a
+
+    def run_pay_gate(self, *, sender: str = JOHN) -> Artifact:
+        self.propose_pay()
+        self.approve_pay(sender=sender)
+        self.sweep("sweep: stage lines")
+        a = self.pay()
+        assert a is not None, "no PAY-1"
+        return a
+
+    def plan(self, aid: str = "CLOSE-1") -> Artifact | None:
+        return self.switch.store.get(aid)
+
+    def pay(self, aid: str = "PAY-1") -> Artifact | None:
+        return self.ledger.store.get(aid)
+
+    def lock(self, aid: str = "LOCK-1") -> Artifact | None:
+        return self.ledger.store.get(aid)
+
+    def paid(self) -> list[str]:
+        return [r["invoice"] for r in self.books.payables(period=BASIS) if r["status"] == "paid"]
 
     def sweep(self, label: str = "sweep") -> list[core.Effect]:
         effects = self.switch.sweep() + self.ledger.sweep()
@@ -549,6 +803,12 @@ def write_report(
             f"- planned {r['department']} {r['account']} {r['amount_cents'] / 100:,.2f} ({r['source']})"
         )
     lines.append(f"- period {PERIOD}: {harness.books.period_status(PERIOD)}")
+    for r in harness.books.payables(period=BASIS):
+        lines.append(
+            f"- {r['invoice']} {r['vendor']} {r['amount_cents'] / 100:,.2f} {r['status']}"
+            + (f" ({r['run_id']})" if r.get("run_id") else "")
+        )
+    lines.append(f"- period {BASIS}: {harness.books.period_status(BASIS)}")
     lines += ["", "## Gateway calls", ""]
     lines += [f"- switch `{op}` {t}" for op, t in harness.rooms.calls] or ["- none"]
     lines += [

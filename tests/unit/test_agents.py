@@ -313,8 +313,11 @@ def test_bookkeeper_proposes_the_entries_from_the_recorded_budget(books):
     assert bookkeeper.trigger(ready, ctx, thread)
     assert not bookkeeper.trigger(_ev(PERIOD_ROOM, JOHN, "status?", name="John"), ctx, thread)
     assert not bookkeeper.trigger(
-        _ev(FINANCE, ISAAC, "@bookkeeper hi", name="Isaac"), ctx, thread
-    ), "the plan room only"
+        _ev(PLANNING, ISAAC, "@bookkeeper hi", name="Isaac"), ctx, thread
+    ), "never in #planning"
+    assert bookkeeper.trigger(
+        _ev(FINANCE, ISAAC, "@analyst @bookkeeper close October", name="Isaac"), ctx, thread
+    ), "the close ask names it"
     agent = build_agent(
         bookkeeper, ctx, ScriptedModel(bookkeeper.fake_step(ctx)), room_id=PERIOD_ROOM
     )
@@ -326,7 +329,7 @@ def test_bookkeeper_proposes_the_entries_from_the_recorded_budget(books):
     assert entries.body.budget == "BUDGET-1" and len(entries.body.lines) == 4
     assert entries.snapshot_hint == Ledger.budget_digest(books.budget(PERIOD))
     assert "Your call, @Leonardo: `@sindarin-ledger approve ENTRIES-n`" in text
-    assert "The goals (room instructions)" in agent.system_prompt()
+    assert "The brief (room instructions)" in agent.system_prompt()
 
 
 # -- shared behaviour ------------------------------------------------------------------------------
@@ -378,3 +381,51 @@ def test_tool_facts_reach_the_next_turn(books):
     prompt = agent.system_prompt()
     assert "What your tools did in this room" in prompt
     assert "Never call your earlier posts made up" in prompt
+
+
+# -- sales -----------------------------------------------------------------------------------------
+
+
+def test_sales_prices_the_deal_from_the_price_book(books):
+    from validation.harness import LEDGER_EXEC, SALES_AGENT, SALES_ROOM, VINCENT
+
+    from sindarin.agents import sales
+
+    ctx = _ctx("sales", SALES_AGENT, books)
+    ask = _ev(SALES_ROOM, VINCENT, "@sales deal Contoso Ltd on Team at 10,200.00 net60", name="V")
+    thread = [Turn(sender=VINCENT, sender_name="Vincent", body=ask.body)]
+    assert sales.trigger(ask, ctx, thread)
+    assert not sales.trigger(_ev(PLANNING, VINCENT, "@sales deal X on Team at 1"), ctx, thread)
+    pending = "**DEAL-1** pending · D-2026-01 · Contoso Ltd · Team at 10,200.00 USD · 2026-10 · ..."
+    assert not sales.trigger(_ev(SALES_ROOM, LEDGER_EXEC, pending, mid="m2"), ctx, thread)
+    header = sales.header(ask, ctx, thread)
+    for part in ("account Contoso Ltd", "product Team", "price 10,200.00", "terms net60"):
+        assert part in header, header
+    agent = build_agent(sales, ctx, ScriptedModel(sales.fake_step(ctx)), room_id=SALES_ROOM)
+    text = agent.respond(thread, header)
+    deal, err = parse_proposal(text)
+    assert err is None and deal.kind is Kind.DEAL
+    assert deal.body.deal_id == "D-2026-01" and deal.body.period == BASIS  # the open month
+    assert deal.body.list_cents == 1200000 and deal.body.discount_bps == 1500
+    assert deal.body.terms == "net60" and deal.body.price_cents == 1020000
+    assert "Your call, @Leonardo: `@sindarin-ledger approve DEAL-n`" in text
+    # the re-proposal keeps the deal id and never reads D-2026-01 as January
+    again = _ev(
+        SALES_ROOM,
+        LEDGER_EXEC,
+        "**DEAL-1** changed since it was proposed: list price 12,000.00 USD → 12,500.00 USD. "
+        "Approvals cleared; @sales please propose again.",
+        mid="m3",
+        thread="m1",
+    )
+    thread2 = [*thread, Turn(sender=LEDGER_EXEC, sender_name="sindarin-ledger", body=pending)]
+    assert sales.trigger(again, ctx, thread2)
+    header2 = sales.header(again, ctx, thread2)
+    assert "deal D-2026-01" in header2 and "period 2026-10" in header2, header2
+    books.set_list_price("Team", 1250000)
+    text2 = agent.respond(
+        [*thread2, Turn(sender=LEDGER_EXEC, sender_name="l", body=again.body)], header2
+    )
+    deal2, err = parse_proposal(text2)
+    assert err is None and deal2.body.deal_id == "D-2026-01" and deal2.body.list_cents == 1250000
+    assert deal2.body.period == BASIS and deal2.body.discount_bps == 1840

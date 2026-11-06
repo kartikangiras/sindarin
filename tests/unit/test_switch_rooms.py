@@ -230,3 +230,49 @@ def test_settle_waits_for_members_then_a_grace_period(monkeypatch):
     # reconciling an existing room does not wait
     adapter.execute(_artifact())
     assert slept == [2.0]
+
+
+class DressedGateway(FakeGateway):
+    """A Gateway with the Switch components around a room: documents, links, groups."""
+
+    def __init__(self):
+        super().__init__()
+        self.documents: list[dict] = []
+        self.attached: list[tuple[str, str]] = []
+        self.links: list[tuple[str, str, str]] = []
+        self.groups: dict[str, str] = {}
+        self.grouped: list[tuple[str, str]] = []
+
+    def create_document(self, *, name, description, instructions, content):
+        self.documents.append({"name": name, "content": content})
+        return f"doc-{len(self.documents)}"
+
+    def attach_document(self, room_id, document_id):
+        self.attached.append((room_id, document_id))
+
+    def link_rooms(self, room_id, target_room_id, label):
+        self.links.append((room_id, target_room_id, label))
+
+    def ensure_room_group(self, name, description=""):
+        return self.groups.setdefault(name, f"group-{len(self.groups) + 1}")
+
+    def put_room_group(self, room_id, group_id):
+        self.grouped.append((room_id, group_id))
+
+
+def test_a_new_room_gets_its_document_link_and_group():
+    gw = DressedGateway()
+    adapter = SwitchRoomsAdapter(gw, bridge_id="b", directory=DIRECTORY)
+    adapter.home_room_id = "!room-acme-finance:test"
+    r = adapter.execute(_artifact())
+    assert r.data["document_id"] == "doc-1" and r.data["group"] == "Acme finance"
+    assert r.data["linked_from"] == "!room-acme-finance:test"
+    assert gw.documents[0]["name"] == "GOALS-1 · Plan November 2026"
+    assert "## Goals for 2026-11" in gw.documents[0]["content"]
+    assert gw.attached == [("!room-plan-2026-11:test", "doc-1")]
+    assert gw.links == [("!room-acme-finance:test", "!room-plan-2026-11:test", "opened by GOALS-1")]
+    assert gw.grouped == [("!room-plan-2026-11:test", "group-1")]
+    # reconciling an existing room dresses nothing twice; a plain gateway is fine without any
+    assert "document_id" not in adapter.execute(_artifact()).data
+    plain = SwitchRoomsAdapter(FakeGateway(), bridge_id="b", directory=DIRECTORY)
+    assert "document_id" not in plain.execute(_artifact()).data

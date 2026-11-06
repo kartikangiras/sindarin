@@ -1,7 +1,7 @@
 """Test 5 — The ledger changed between proposal and approval (design v5 §5, A6).
 
 BUDGET-1 is pending, built on October's actuals. A late October sale of 3,980.00 USD lands in
-the books. Isaac's approval is refused with the difference in plain money, the snapshot is
+the books, typed to sindarin-ledger from chat. Isaac's approval is refused with the difference in plain money, the snapshot is
 replaced and the planner is asked to propose again. The re-proposal keeps the id; Isaac
 approves; the budget is recorded.
 """
@@ -9,7 +9,7 @@ approves; the budget is recorded.
 from __future__ import annotations
 
 from sindarin.executor import core
-from validation.harness import ISAAC, Harness, write_report
+from validation.harness import ISAAC, PLANNING, Harness, write_report
 
 
 def _posts(fx):
@@ -21,7 +21,12 @@ def test_changed_after_proposal(harness: Harness):
     h.run_goals_gate()
     h.propose_budget()
     before = h.budget().snapshot_sha
-    h.books.add_sale("S-2026-1055", "2026-10-30", "Contoso Ltd", 398000)
+    fx = h.command("m-sale", "sale S-2026-1055 3980.00 Contoso Ltd", sender=ISAAC, room=PLANNING)
+    assert [p.text for p in _posts(fx)] == [
+        "**S-2026-1055** Contoso Ltd 3,980.00 USD landed in 2026-10 · 2026-10 revenue is now "
+        "93,885.00 USD."
+    ]
+    assert "sale_booked" in h.audit_events()
 
     fx = h.approve_budget("m-approve-1", sender=ISAAC)
     texts = [p.text for p in _posts(fx)]
@@ -55,6 +60,7 @@ def test_changed_after_proposal(harness: Harness):
         "PASS: the yes was refused with the changed revenue, the snapshot replaced, the "
         "re-proposal approved and recorded.",
         [
+            "a sale typed from chat lands in the books under the person's id",
             "the refusal names the basis month and both revenues in money",
             "the snapshot is replaced; nothing is recorded on the stale yes",
             "the re-proposal keeps the id and is recorded",

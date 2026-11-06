@@ -141,3 +141,26 @@ def test_states_and_status_fence(books):
     text = fence.render()
     assert text.startswith("```sindarin-status") and '"state":"recorded"' in text
     assert "@p:t" not in text and render_fence("x", {"a": 1}) == '```x\n{"a":1}\n```'
+
+
+def test_deal_body_binds_the_discount_to_the_prices():
+    from pydantic import ValidationError
+
+    from sindarin.schema import DealBody
+
+    d = DealBody(
+        period="2026-11",
+        deal_id="D-2026-01",
+        account="Contoso Ltd",
+        product="Team",
+        list_cents=1200000,
+        price_cents=1020000,
+        discount_bps=1500,
+    )
+    assert d.discount_cents == 180000 and d.terms == "standard"
+    with pytest.raises(ValidationError, match="is not the discount"):
+        DealBody(**{**d.model_dump(), "discount_bps": 1000})
+    with pytest.raises(ValidationError, match="above the list price"):
+        DealBody(**{**d.model_dump(), "price_cents": 1300000, "discount_bps": 0})
+    with pytest.raises(ValidationError):
+        DealBody(**{**d.model_dump(), "deal_id": "DEAL-1"})
