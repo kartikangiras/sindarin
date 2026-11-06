@@ -11,12 +11,14 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from pathlib import Path
+from typing import Any
 
 from sindarin.adapters.base import Adapter
 from sindarin.executor import core
 from sindarin.executor.config import Env, ExecutorConfig, load_executor
 from sindarin.executor.runner import Effector, RunnerConfig
 from sindarin.names import DISPLAY, LEDGER_EXECUTOR, SWITCH_EXECUTOR
+from sindarin.policy import load_policy
 from sindarin.store import Store
 from sindarin.switch.client import ConnectionState, FatalEviction, SwitchClient, SwitchError
 from sindarin.switch.events import ControlFrame, Frame, MessageEvent, RoomJoinEvent
@@ -51,13 +53,23 @@ class ExecutorService:
         cfg: ExecutorConfig,
         client: SwitchClient,
         adapters: dict[str, Adapter],
+        *,
+        ledger: Any | None = None,
+        files: Any | None = None,
     ) -> None:
         self.exec_dir = exec_dir
         self.env = env
         self.cfg = cfg
         self.client = client
         self.store = Store(cfg.db_path(exec_dir))
-        self.effector = Effector(self.store, adapters, self._post, runner_config(exec_dir, cfg))
+        self.effector = Effector(
+            self.store,
+            adapters,
+            self._post,
+            runner_config(exec_dir, cfg),
+            ledger=ledger,
+            files=files,
+        )
         self.queue: asyncio.Queue[object] = asyncio.Queue()
         self.stop = asyncio.Event()
         self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="sindarin-handler")
@@ -175,20 +187,33 @@ def build_adapters(env: Env, cfg: ExecutorConfig, exec_dir: Path) -> dict[str, A
         from sindarin.adapters.ledger import LedgerAdapter
         from sindarin.ledger import Ledger
 
-        return {"ledger": LedgerAdapter(Ledger(cfg.resolve(exec_dir, cfg.ledger_db)))}
+        writer = None
+        if cfg.sheet_url and env.google_sa:
+            from sindarin.sheets import SheetWriter
+
+            try:
+                writer = SheetWriter(cfg.sheet_url, env.google_sa)
+                log.info("write-back into the team's sheet is on")
+            except Exception as exc:
+                log.warning("sheet write-back off: %s", str(exc)[:120])
+        return {"ledger": LedgerAdapter(Ledger(cfg.resolve(exec_dir, cfg.ledger_db)), writer)}
     from sindarin.adapters.switch_rooms import SwitchRoomsAdapter
     from sindarin.switch.gateway import GatewayClient
 
     gateway = GatewayClient.login(env.gateway_url, env.gateway_email, env.gateway_password)
     bridge = cfg.bridge_id or gateway.default_bridge_id() or ""
-    return {
-        "switch": SwitchRoomsAdapter(
-            gateway,
-            bridge_id=bridge,
-            directory=cfg.directory,
-            scoped_addressing=cfg.addressing == "rooms",
-        ),
-    }
+    rooms = SwitchRoomsAdapter(
+        gateway,
+        bridge_id=bridge,
+        directory=cfg.directory,
+        scoped_addressing=cfg.addressing == "rooms",
+    )
+    try:
+        policy = load_policy(cfg.resolve(exec_dir, cfg.policy_path))
+        rooms.home_room_id = policy.room_id("finance")
+    except Exception as exc:
+        log.warning("home room unknown: %s", exc.__class__.__name__)
+    return {"switch": rooms}
 
 
 async def run_executor(exec_dir: Path, short: str) -> int:
@@ -215,7 +240,18 @@ async def run_executor(exec_dir: Path, short: str) -> int:
     except Exception as exc:
         log.error("adapter setup failed: %s", str(exc)[:200])
         return 1
-    service = ExecutorService(exec_dir, env, cfg, client, adapters)
+    ledger = files = None
+    if cfg.executor == SWITCH_EXECUTOR:
+        # the reporting rail: a read-only handle on the books, files through Switch
+        from sindarin.adapters.files import GatewayFiles
+        from sindarin.ledger import Ledger
+
+        books = cfg.resolve(exec_dir, cfg.ledger_db)
+        ledger = Ledger(books, readonly=True) if books.exists() else None
+        if ledger is None:
+            log.warning("no ledger at %s yet; report/export/chart answer without rows", books)
+        files = GatewayFiles(adapters["switch"].gateway)  # type: ignore[union-attr]
+    service = ExecutorService(exec_dir, env, cfg, client, adapters, ledger=ledger, files=files)
     log.info("%s starting · self=%s · peers=%s", cfg.executor, cfg.self_id, cfg.peer_ids)
     try:
         return await service.run()

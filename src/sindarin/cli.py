@@ -87,18 +87,44 @@ def _ledger(executor_dir: Path | None):
 @ledger_app.command("import")
 def ledger_import(
     period: Annotated[str | None, typer.Option(help="YYYY-MM; default every folder")] = None,
+    sheet: Annotated[
+        str | None,
+        typer.Option(
+            help="A Google Sheets link shared by link: tabs accounts, sales, payables, targets "
+            "and, optionally, price_book"
+        ),
+    ] = None,
+    xlsx: Annotated[Path | None, typer.Option(help="An Excel workbook with the same tabs")] = None,
     executor_dir: Annotated[Path | None, typer.Option()] = None,
 ) -> None:
-    """Load a period folder (accounts.csv, sales.csv, payables.csv, targets.csv) into the ledger."""
-    ledger, data_dir, _ = _ledger(executor_dir)
+    """Load the books: from data/acme/<period>/ (CSV), from the team's Google Sheet, or from an
+    Excel workbook. The sheet's link is remembered in executor/ledger.yaml for the write-back."""
+    from sindarin.sheets import SheetError, read_sheet, read_xlsx
+
+    ledger, data_dir, cfg = _ledger(executor_dir)
+    if sheet or xlsx:
+        try:
+            tabs = read_sheet(sheet) if sheet else read_xlsx(xlsx)  # type: ignore[arg-type]
+        except (SheetError, OSError) as exc:
+            _fail(str(exc))
+            return
+        counts = ledger.import_tabs(tabs)
+        if sheet:
+            from sindarin.executor.config import save_config
+
+            cfg.sheet_url = sheet
+            save_config(_exec_dir(executor_dir) / "ledger.yaml", cfg)
+        print(f"imported from {sheet or xlsx}: {counts}")
+        print(f"ledger {ledger.path}: {counts['sales']} sales rows, {counts['payables']} payables")
+        return
     folders = [data_dir / period] if period else sorted(p for p in data_dir.iterdir() if p.is_dir())
-    total = {"accounts": 0, "sales": 0, "payables": 0, "targets": 0}
+    total: dict[str, int] = {}
     for folder in folders:
         if not (folder / "sales.csv").exists():
             _fail(f"no sales.csv in {folder}")
         counts = ledger.import_dir(folder)
         for k, v in counts.items():
-            total[k] += v
+            total[k] = total.get(k, 0) + v
         print(f"imported {folder.name}: {counts}")
     print(f"ledger {ledger.path}: {total['sales']} sales rows, {total['payables']} payables")
 
@@ -144,6 +170,30 @@ def ledger_show(
         print(
             f"{row['invoice']} {row['vendor']} {money(row['amount_cents'])} {row['status']}{tail}"
         )
+
+
+@ledger_app.command("export-xlsx")
+def ledger_export_xlsx(
+    path: Annotated[Path, typer.Argument(help="where to write the workbook, e.g. acme.xlsx")],
+    executor_dir: Annotated[Path | None, typer.Option()] = None,
+) -> None:
+    """The whole ledger as an Excel workbook, one sheet per table, for teams that work in Excel."""
+    from sindarin.sheets import write_xlsx
+
+    ledger, _, _ = _ledger(executor_dir)
+    periods = ledger.periods()
+    tabs = {
+        "accounts": [{"code": k, **v} for k, v in ledger.accounts().items()],
+        "sales": [r for p in periods for r in ledger.sales(p)],
+        "payables": [r for p in periods for r in ledger.payables(period=p)],
+        "targets": [t for p in periods if (t := ledger.targets(p))],
+        "budget": [r for p in periods for r in ledger.budget(p)],
+        "planned": [r for p in periods for r in ledger.planned(p)],
+        "price_book": [{"product": k, "list_cents": v} for k, v in ledger.price_book().items()],
+        "deals": ledger.deals(),
+    }
+    out = write_xlsx(path, {k: v for k, v in tabs.items() if v})
+    print(f"wrote {out} · " + ", ".join(f"{k} {len(v)}" for k, v in tabs.items() if v))
 
 
 @ledger_app.command("add-sale")
@@ -195,6 +245,26 @@ def ledger_amend(
         _fail(str(exc))
         return
     print(f"{row['invoice']} {row['vendor']} is now {money(row['amount_cents'])}")
+
+
+@ledger_app.command("price")
+def ledger_price(
+    product: Annotated[str, typer.Argument(help="e.g. Team")],
+    amount: Annotated[str, typer.Option(help="new list price, e.g. 12500.00")],
+    executor_dir: Annotated[Path | None, typer.Option()] = None,
+) -> None:
+    """Edit a list price in the price book: the books move under a pending deal."""
+    from sindarin.ledger import LedgerError
+    from sindarin.schema import money
+
+    ledger, _, _ = _ledger(executor_dir)
+    cents = round(float(amount) * 100)
+    try:
+        row = ledger.set_list_price(product, cents)
+    except LedgerError as exc:
+        _fail(str(exc))
+        return
+    print(f"{row['product']} list price is now {money(row['list_cents'])}")
 
 
 @ledger_app.command("reset")

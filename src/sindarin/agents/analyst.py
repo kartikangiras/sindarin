@@ -31,7 +31,38 @@ MONTH_REPORT = strict_tool(
 )
 
 
+READ_FILE = strict_tool(
+    "read_file",
+    "Read the file behind a link a person shared: a Google Sheet, a file on Drive, an .xlsx or "
+    ".csv link. Returns what it holds tab by tab and what is wrong with it, to post verbatim; "
+    "or the one-line reason it could not be read, with what the person should do.",
+    {
+        "link": {"type": "string", "description": "the http(s) link as the person pasted it"},
+        "tab": {
+            "type": "string",
+            "description": "a tab name to list that tab's entries; empty for the whole file",
+        },
+    },
+    ["link", "tab"],
+)
+
+
 def tools(ctx: RoleContext) -> list[Tool]:
+    def read_file(args: dict[str, Any]) -> tuple[str, bool]:
+        from sindarin import workbook
+
+        link = workbook.link_in(str(args.get("link", "")))
+        if not link:
+            return "which link? paste an http(s) link to the file", False
+        tab = str(args.get("tab", "")).strip()
+        try:
+            book = workbook.fetch(link)
+            if tab:
+                return workbook.rows_table(book, tab)[0], True
+            return workbook.render(workbook.inspect(book)), True
+        except workbook.FileError as exc:
+            return str(exc), False
+
     def month_report(args: dict[str, Any]) -> tuple[str, bool]:
         if ctx.ledger is None:
             return "no ledger configured", False
@@ -43,7 +74,7 @@ def tools(ctx: RoleContext) -> list[Tool]:
         except Exception as exc:
             return f"could not read the ledger: {exc.__class__.__name__}", False
 
-    return [Tool(MONTH_REPORT, month_report)]
+    return [Tool(MONTH_REPORT, month_report), Tool(READ_FILE, read_file)]
 
 
 def context_text(ctx: RoleContext, room_id: str = "") -> str:
@@ -76,7 +107,8 @@ def header(ev: MessageEvent, ctx: RoleContext, thread: list[Turn]) -> str:
     texts = [ev.body or "", root.body if root else "", " ".join(t.body for t in thread)]
     period = period_from_any(texts, ctx.ledger)
     basis = report_period(period, ctx.ledger)
-    planned = "planned" if "is planned" in (ev.body or "") else "open"
+    body = ev.body or ""
+    planned = "planned" if "is planned" in body else "locked" if "is locked" in body else "open"
     root_id = ev.thread_id or ev.message_id
     return (
         f"[Room {ctx.room_name(ev.room_id)} (finance) · thread root {root_id} · asked by "
@@ -99,21 +131,50 @@ def fake_step(ctx: RoleContext) -> Callable[[list[dict[str, Any]], str], tuple[A
         basis = _between(header_line, "basis ", " ·")
         who = _between(header_line, "mention as ", " ·") or "@there"
         planned = "(planned)" in header_line
+        locked = "(locked)" in header_line
         history = tool_history(messages)
         turns = human_turns(messages)
+        from sindarin.workbook import link_in
+
+        link = link_in(" ".join(turns))
+        if link and not history:
+            words = " ".join(turns).lower()
+            tab = next((t for t in ("sales", "payables", "accounts", "targets") if t in words), "")
+            return ("tool", "read_file", {"link": link, "tab": tab})
+        if link and history and history[-1][0] == "read_file":
+            _, _, out, ok = history[-1]
+            if not ok:
+                return ("text", f"{who} I could not read that file: {out}.")
+            return ("text", f"{who} here is what the file holds.\n{out}")
         if not history:
             return ("tool", "month_report", {"period": basis or period})
         name, args, out, ok = history[-1]
         if not ok:
             return ("text", f"{who} I could not read the ledger: {out}")
         label = month_label(period) if period else "the month"
+        if locked:
+            first = out.splitlines()[0]
+            return (
+                "text",
+                f"{who} {label} is closed. {first} Payables are paid and the period is locked; "
+                "the full report is above in this thread.",
+            )
         if planned:
             return (
                 "text",
                 f"{who} {label} is planned: goals approved, the budget recorded and its "
                 "register entries posted. The basis month is above in this thread.",
             )
-        tail = "The planner's goals follow in this thread." if turns else ""
+        asked_close = any("close" in t.lower() for t in turns)
+        tail = (
+            (
+                "The bookkeeper's plan follows in this thread."
+                if asked_close
+                else "The planner's goals follow in this thread."
+            )
+            if turns
+            else ""
+        )
         shown = month_label(basis) if basis else label
         return ("text", f"{who} here is {shown}.\n{out}\n{tail}".rstrip())
 

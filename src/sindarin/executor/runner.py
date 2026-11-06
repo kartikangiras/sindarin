@@ -11,8 +11,9 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
+from sindarin import workbook
 from sindarin.adapters.base import ActionResult, Adapter, AdapterError, Facts, VerifyResult
 from sindarin.executor import commands as cmd
 from sindarin.executor import core
@@ -46,6 +47,14 @@ class RunnerConfig:
     )
 
 
+class FilePoster(Protocol):
+    """Posts a file into a room (Switch attachments); returns False when it cannot."""
+
+    def post_file(
+        self, room_id: str, text: str, filename: str, data: bytes, mime: str, thread_id: str | None
+    ) -> bool: ...
+
+
 class Effector:
     def __init__(
         self,
@@ -54,12 +63,17 @@ class Effector:
         poster: Poster,
         config: RunnerConfig,
         clock: Callable[[], datetime] = utcnow,
+        *,
+        ledger: Any | None = None,
+        files: FilePoster | None = None,
     ) -> None:
         self.store = store
         self.adapters = dict(adapters)
         self.poster = poster
         self.config = config
         self.clock = clock
+        self.ledger = ledger  # a read-only handle for reports (sindarin-switch)
+        self.files = files
         self._file_cache: dict[Path, tuple[int, Any]] = {}
 
     # -- context ------------------------------------------------------------------------------
@@ -212,7 +226,234 @@ class Effector:
                     applied.extend(self._execute(aid))
                 case core.Verify(artifact_id=aid):
                     applied.extend(self._verify(aid))
+                case core.BookSale():
+                    applied.extend(self._book_sale(e))
+                case core.SetPrice():
+                    applied.extend(self._set_price(e))
+                case core.InspectFile():
+                    applied.extend(self._inspect_file(e))
+                case core.LoadBooks():
+                    applied.extend(self._load_books(e))
+                case core.RunReport():
+                    applied.extend(self._run_report(e))
         return applied
+
+    def _run_report(self, e: core.RunReport) -> list[core.Effect]:
+        """Render from the read-only ledger; attach the file through Switch when a poster is
+        wired, else fall back to the text form (a code-block chart, the rows inline)."""
+        from sindarin import reports
+
+        if self.ledger is None:
+            return self.apply([core.Post(e.room_id, "No ledger here to report from.", e.thread_id)])
+        try:
+            if e.what == "report":
+                out = reports.report(self.ledger, e.period)
+            elif e.what == "export":
+                out = reports.export(self.ledger, e.period, e.subject)
+            elif self.files is not None:
+                out = reports.chart_png(self.ledger, e.period, e.subject)
+            else:
+                out = reports.chart_text(self.ledger, e.period, e.subject)
+        except reports.ReportError as exc:
+            return self.apply(
+                [core.Post(e.room_id, f"**{e.what} {e.period}** — {exc}.", e.thread_id)]
+            )
+        except Exception as exc:  # a drawing library failure must not take the executor down
+            log.warning("%s failed: %s", e.what, exc.__class__.__name__)
+            return self.apply(
+                [core.Post(e.room_id, f"**{e.what} {e.period}** — could not render.", e.thread_id)]
+            )
+        posted_file = False
+        if out.data and self.files is not None:
+            try:
+                posted_file = self.files.post_file(
+                    e.room_id, out.text, out.filename, out.data, out.mime, e.thread_id
+                )
+            except Exception as exc:
+                log.warning("file post failed: %s", str(exc)[:120])
+        effects: list[core.Effect] = [
+            core.Audit(
+                f"{e.what}_posted",
+                actor_id=e.actor_id,
+                actor_name=e.actor_name,
+                room_id=e.room_id,
+                details={**out.facts, "rows": out.rows, "file": posted_file},
+            )
+        ]
+        if not posted_file:
+            text = out.text
+            if out.data and e.what == "export":
+                body = out.data.decode("utf-8", errors="replace")
+                text = f"{out.text}\n```csv\n{body[:3000]}\n```"
+            elif out.data and e.what == "chart":
+                text = reports.chart_text(self.ledger, e.period, e.subject).text
+            effects.append(core.Post(e.room_id, text, e.thread_id))
+        return self.apply(effects)
+
+    def _inspect_file(self, e: core.InspectFile) -> list[core.Effect]:
+        """Fetch the linked file, describe it and check it against the books' layout."""
+        who = {"actor_id": e.actor_id, "actor_name": e.actor_name, "room_id": e.room_id}
+        try:
+            book = workbook.fetch(e.url)
+            if e.tab:
+                text, data, filename = workbook.rows_table(book, e.tab)
+                details = {"url": e.url[:200], "name": book.name, "tab": e.tab, "bytes": len(data)}
+                out: list[core.Effect] = [core.Audit("file_read", details=details, **who)]
+                attached = False
+                if data and self.files is not None:
+                    try:
+                        attached = self.files.post_file(
+                            e.room_id, text, filename, data, "text/csv", e.thread_id
+                        )
+                    except Exception as exc:
+                        log.warning("tab not attached: %s", str(exc)[:120])
+                if not attached:
+                    out.append(core.Post(e.room_id, text, e.thread_id))
+                return self.apply(out)
+            ins = workbook.inspect(book)
+            details = {
+                "url": e.url[:200],
+                "name": book.name,
+                "tabs": len(ins.tabs),
+                "problems": len(ins.problems),
+                "loadable": ins.loadable,
+            }
+            out = [
+                core.Audit("file_read", details=details, **who),
+                core.Post(e.room_id, workbook.render(ins), e.thread_id),
+            ]
+        except workbook.FileError as exc:
+            out = [
+                core.Audit(
+                    "file_refused", details={"url": e.url[:200], "error": str(exc)[:160]}, **who
+                ),
+                core.Post(e.room_id, f"**read** — {exc}.", e.thread_id),
+            ]
+        return self.apply(out)
+
+    def _load_books(self, e: core.LoadBooks) -> list[core.Effect]:
+        """Fetch the linked file; if the books can take it, the ledger adapter loads it."""
+        from sindarin.names import SWITCH_EXECUTOR
+
+        who = {"actor_id": e.actor_id, "actor_name": e.actor_name, "room_id": e.room_id}
+        adapter = self.adapters.get("ledger")
+        if adapter is None or not hasattr(adapter, "load_books"):
+            return self.apply([core.Post(e.room_id, "**load** — no ledger here.", e.thread_id)])
+        try:
+            book = workbook.fetch(e.url)
+            ins = workbook.inspect(book)
+            if not ins.loadable:
+                why = "; ".join([f"no `{m}` tab" for m in ins.missing] + ins.problems[:5])
+                text = (
+                    f"**load** refused — {book.name} is not loadable as the books: {why}. "
+                    f"`read <link>` to {SWITCH_EXECUTOR} shows the whole check."
+                )
+                out: list[core.Effect] = [
+                    core.Audit(
+                        "load_refused", details={"url": e.url[:200], "why": why[:300]}, **who
+                    ),
+                    core.Post(e.room_id, text, e.thread_id),
+                ]
+            else:
+                res = adapter.load_books(workbook.books_tabs(ins))
+                counts = {k: int(v) for k, v in res["counts"].items() if v}
+                skipped = list(res.get("skipped", []))
+                loaded = ", ".join(f"{v} {k.replace('_', ' ')}" for k, v in counts.items())
+                by_reason: dict[str, list[str]] = {}
+                for s in skipped:
+                    by_reason.setdefault(str(s["reason"]), []).append(str(s["invoice"]))
+                kept = ", ".join(
+                    f"{', '.join(invs)} ({why})" if len(invs) <= 3 else f"{len(invs)} rows ({why})"
+                    for why, invs in by_reason.items()
+                )
+                skip = f" · kept as they were: {kept}" if kept else ""
+                per = ", ".join(res.get("periods", [])) or "no month"
+                text = (
+                    f"**{book.name}** loaded into the books by {e.actor_name} · {loaded} · "
+                    f"{per}{skip}. `report <period>` to {SWITCH_EXECUTOR} reads them."
+                )
+                details = {"url": e.url[:200], "name": book.name, **counts, "skipped": len(skipped)}
+                out = [
+                    core.Audit("books_loaded", details=details, **who),
+                    core.Post(e.room_id, text, e.thread_id),
+                ]
+        except (workbook.FileError, AdapterError) as exc:
+            out = [
+                core.Audit(
+                    "load_refused", details={"url": e.url[:200], "error": str(exc)[:160]}, **who
+                ),
+                core.Post(e.room_id, f"**load** — {exc}.", e.thread_id),
+            ]
+        return self.apply(out)
+
+    def _set_price(self, e: core.SetPrice) -> list[core.Effect]:
+        """A person's list price edit, written by the ledger adapter and answered in the thread."""
+        adapter = self.adapters.get("ledger")
+        if adapter is None or not hasattr(adapter, "set_price"):
+            return self.apply(
+                [
+                    core.Post(
+                        e.room_id, f"**{e.product}** not repriced — no ledger here.", e.thread_id
+                    )
+                ]
+            )
+        try:
+            data = adapter.set_price(e.product, e.amount_cents)
+            out: list[core.Effect] = [
+                core.Audit(
+                    "price_set",
+                    actor_id=e.actor_id,
+                    actor_name=e.actor_name,
+                    room_id=e.room_id,
+                    details={"product": e.product, **data},
+                ),
+                core.Post(e.room_id, core.price_set_text(e, data), e.thread_id),
+            ]
+        except AdapterError as exc:
+            out = [
+                core.Audit(
+                    "price_refused",
+                    actor_id=e.actor_id,
+                    actor_name=e.actor_name,
+                    room_id=e.room_id,
+                    details={"product": e.product, "error": str(exc)[:160]},
+                ),
+                core.Post(e.room_id, f"**{e.product}** not repriced — {exc}.", e.thread_id),
+            ]
+        return self.apply(out)
+
+    def _book_sale(self, e: core.BookSale) -> list[core.Effect]:
+        """A person's late sale, written by the ledger adapter and answered in the thread."""
+        adapter = self.adapters.get("ledger")
+        if adapter is None or not hasattr(adapter, "book_sale"):
+            out: list[core.Effect] = [
+                core.Post(e.room_id, f"**{e.invoice}** not booked — no ledger here.", e.thread_id)
+            ]
+        else:
+            try:
+                data = adapter.book_sale(e.invoice, e.customer, e.amount_cents)
+                out = [
+                    core.Audit(
+                        "sale_booked",
+                        actor_id=e.actor_id,
+                        actor_name=e.actor_name,
+                        room_id=e.room_id,
+                        details={"invoice": e.invoice, **data},
+                    ),
+                    core.Post(e.room_id, core.sale_booked_text(e, data), e.thread_id),
+                ]
+            except AdapterError as exc:
+                out = [
+                    core.Audit(
+                        "sale_refused",
+                        actor_id=e.actor_id,
+                        actor_name=e.actor_name,
+                        room_id=e.room_id,
+                        details={"invoice": e.invoice, "error": str(exc)[:160]},
+                    ),
+                    core.Post(e.room_id, f"**{e.invoice}** not booked — {exc}.", e.thread_id),
+                ]
+        return self.apply(out)
 
     def _audit(self, e: core.Audit) -> None:
         entry = self.store.append_audit(
