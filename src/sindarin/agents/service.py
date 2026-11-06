@@ -6,12 +6,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import re
 from collections import defaultdict
 from pathlib import Path
 from types import ModuleType
 
-from sindarin.agents import coder, product, release, reviewer
+from sindarin.agents import analyst, bookkeeper, planner
 from sindarin.agents.base import (
     RoleAgent,
     ScriptedModel,
@@ -19,24 +18,20 @@ from sindarin.agents.base import (
     anthropic_model_call,
     is_fake_model,
 )
-from sindarin.agents.github_client import AgentGitHub, RealGitHub, SimGitHub
-from sindarin.agents.roles import PENDING_RE, RoleContext, build_agent
-from sindarin.executor.config import Env, load_config, load_env
-from sindarin.executor.core import parse_proposal
+from sindarin.agents.roles import BRIEF_RE, RoleContext, build_agent
+from sindarin.executor.config import Env, load_config, process_env, root_env_path
+from sindarin.ledger import Ledger
 from sindarin.names import AGENT_ROLES, SWITCH_EXECUTOR
-from sindarin.schema import Kind
 from sindarin.switch.client import ConnectionState, FatalEviction, SwitchClient, SwitchError
 from sindarin.switch.events import ControlFrame, Frame, MessageEvent
 
 log = logging.getLogger("sindarin.agents")
 
 ROLES: dict[str, ModuleType] = {
-    product.NAME: product,
-    coder.NAME: coder,
-    reviewer.NAME: reviewer,
-    release.NAME: release,
+    analyst.NAME: analyst,
+    planner.NAME: planner,
+    bookkeeper.NAME: bookkeeper,
 }
-BRIEF_RE = re.compile(r"\*\*(SPEC-\d+)\*\* instructions", re.IGNORECASE)
 
 
 class AgentService:
@@ -47,6 +42,7 @@ class AgentService:
         self.ctx = ctx
         self.client = client
         self.env = env
+        self._brief_asked: set[str] = set()  # feature rooms where `brief` was requested once
         self.model_call = model_call
         self.threads: dict[str, list[Turn]] = defaultdict(list)
         self.queue: asyncio.Queue[MessageEvent] = asyncio.Queue()
@@ -55,59 +51,12 @@ class AgentService:
     # -- learning from the stream (no model involved) ---------------------------------------
 
     def _learn(self, ev: MessageEvent) -> None:
+        """The one thing an agent keeps from the stream: the goals posted into a plan room by
+        sindarin-switch (its brief). Everything else a turn needs comes from the executors on
+        demand, so a restarted agent is no worse off than a running one."""
         body = ev.body or ""
-        mem = self.ctx.memory
         if ev.sender == self.ctx.policy().executor_id(SWITCH_EXECUTOR) and BRIEF_RE.search(body):
-            mem.setdefault("briefs", {})[ev.room_id] = body
-        if self.ctx.room_key(ev.room_id) == "product":
-            if "```sindarin-proposal" in body:
-                proposal, _ = parse_proposal(body)
-                if proposal is not None and proposal.kind is Kind.SPEC and proposal.ask:
-                    mem.setdefault("ask_by_thread", {})[ev.thread_id or ev.message_id] = (
-                        proposal.ask
-                    )
-            m = PENDING_RE.search(body)
-            if m and ev.thread_id and m.group(1).startswith("SPEC-"):
-                ask = mem.get("ask_by_thread", {}).get(ev.thread_id)
-                if ask:
-                    mem.setdefault("asks", {})[m.group(1)] = ask
-        if (
-            self.ctx.room_key(ev.room_id) == "customer"
-            and ev.thread_id is None
-            and self.ctx.is_human(ev.sender)
-        ):
-            mem["asker"] = ev.sender
-        if self.ctx.room_key(ev.room_id) == "releases" and "```sindarin-proposal" in body:
-            proposal, _ = parse_proposal(body)
-            if proposal is not None and proposal.kind is Kind.RELEASE:
-                mem.setdefault("release_by_thread", {})[ev.thread_id or ev.message_id] = list(
-                    proposal.body.specs
-                )  # type: ignore[union-attr]
-        if self.ctx.room_key(ev.room_id) == "releases":
-            m = PENDING_RE.search(body)
-            if m and m.group(1).startswith("REL-") and ev.sender in self.ctx.executor_ids():
-                specs = mem.get("release_by_thread", {}).get(ev.thread_id or "") or mem.get(
-                    "last_release_specs"
-                )
-                if specs:
-                    mem.setdefault("releases", {})[m.group(1)] = list(specs)
-                    mem.setdefault("release_by_thread", {})[ev.thread_id or ev.message_id] = list(
-                        specs
-                    )
-
-    def _remember_own(self, text: str) -> None:
-        """An agent does not receive its own posts (verified 2026-11-05), so what it proposed is
-        noted here before posting: the executor's `pending` reply names the id a moment later."""
-        if "```sindarin-proposal" not in text:
-            return
-        proposal, _ = parse_proposal(text)
-        if proposal is None:
-            return
-        mem = self.ctx.memory
-        if proposal.kind is Kind.RELEASE:
-            mem["last_release_specs"] = list(proposal.body.specs)  # type: ignore[union-attr]
-        elif proposal.kind is Kind.SPEC and proposal.ask:
-            mem["last_spec_ask"] = proposal.ask
+            self.ctx.memory.setdefault("briefs", {})[ev.room_id] = body
 
     async def on_frame(self, frame: Frame) -> None:
         if isinstance(frame, ControlFrame) and frame.type == "connection_state":
@@ -152,20 +101,48 @@ class AgentService:
         except Exception:
             log.exception("trigger failed")
 
+    async def _fetch_brief(self, room_id: str) -> None:
+        """The brief posted when a plan room opens can miss a member the bridge was still
+        syncing (seen 2026-11-06), and a restarted agent never saw it. Ask sindarin-switch once
+        and give its answer a few seconds to arrive before the turn runs."""
+        if room_id not in self._brief_asked:
+            self._brief_asked.add(room_id)
+            try:
+                await asyncio.to_thread(
+                    self.client.post,
+                    room_id,
+                    f"@{SWITCH_EXECUTOR} brief",
+                    None,
+                    connection_id=self.env.connection_id,
+                )
+            except SwitchError as exc:
+                log.error("brief request failed: %s", exc)
+                return
+        for _ in range(16):
+            if self.ctx.brief(room_id):
+                return
+            await asyncio.sleep(0.5)
+        log.warning("no brief for room %s yet; answering without the goals", room_id)
+
     async def worker(self) -> None:
         while True:
             ev = await self.queue.get()
             root = ev.thread_id or ev.message_id
             thread = list(self.threads.get(root, []))
             try:
+                if self.ctx.is_period_room(ev.room_id) and not self.ctx.brief(ev.room_id):
+                    await self._fetch_brief(ev.room_id)
                 agent: RoleAgent = build_agent(
                     self.role, self.ctx, self.model_call, room_id=ev.room_id
                 )
                 header = self.role.header(ev, self.ctx, thread)
                 text = await asyncio.to_thread(agent.respond, thread, header)
+                if agent.tool_log:
+                    facts = self.ctx.memory.setdefault("tool_facts", {}).setdefault(ev.room_id, [])
+                    facts.extend(agent.tool_log)
+                    del facts[:-20]
                 log.info("%s replies in %s: %r", self.role.NAME, ev.room_id, text[:80])
                 for out in self.role.route(text, ev, self.ctx, thread):
-                    self._remember_own(out.text)
                     await asyncio.to_thread(
                         self.client.post,
                         out.room_id,
@@ -195,23 +172,14 @@ class AgentService:
         return 0
 
 
-def github_for(role: str, repo_root: Path, values: dict[str, str]) -> AgentGitHub | None:
-    """The agents' GitHub: the simulated repository when the executor simulates, else the API
-    with whatever token this role holds (the coder's scoped token; read-only for the others)."""
-    from sindarin.policy import load_policy
-
-    cfg = load_config(repo_root / "executor" / "github.yaml")
-    policy = load_policy(repo_root / "agents" / "policy" / "policy.yaml")
-    repo = next((r.repo for r in policy.rules if r.repo), "")
-    if cfg.github_mode == "simulated":
-        return SimGitHub(repo_root / "executor" / "simulated-github.json", repo)
-    if not repo:
+def ledger_for(repo_root: Path) -> Ledger | None:
+    """A read-only handle on the ledger sindarin-ledger writes, when the file exists."""
+    cfg = load_config(repo_root / "executor" / "ledger.yaml")
+    path = cfg.resolve(repo_root / "executor", cfg.ledger_db)
+    if not path.exists():
+        log.warning("no ledger at %s yet; run `sindarin ledger import`", path)
         return None
-    if role == coder.NAME:
-        token = values.get("CODER_GITHUB_TOKEN", "")
-        return RealGitHub(token, repo) if token else None
-    # reviewer and release hold no GitHub credential: anonymous reads of the public repository
-    return RealGitHub(values.get("GITHUB_TOKEN", ""), repo)
+    return Ledger(path, readonly=True)
 
 
 async def run_agent(repo_root: Path, role_name: str) -> int:
@@ -219,8 +187,8 @@ async def run_agent(repo_root: Path, role_name: str) -> int:
         log.error("unknown role %s; one of %s", role_name, ", ".join(AGENT_ROLES))
         return 1
     role = ROLES[role_name]
-    env_path = repo_root / "agents" / role_name / ".env"
-    values = load_env(env_path, env_override=False)
+    env_path = root_env_path(repo_root)
+    values = process_env(repo_root, role_name)  # only this role's block of the root .env
     env = Env.from_values(values)
     missing = env.missing(
         "SWITCH_BRIDGE_URL", "SWITCH_AGENT_ID", "SWITCH_AGENT_API_KEY", "SWITCH_CONNECTION_ID"
@@ -234,7 +202,7 @@ async def run_agent(repo_root: Path, role_name: str) -> int:
     if not fake and not os.environ.get("ANTHROPIC_API_KEY"):
         log.error(
             "ANTHROPIC_API_KEY is not set in %s or the environment (or set SINDARIN_MODEL=fake)",
-            env_path,
+            root_env_path(repo_root),
         )
         return 1
     policy_path = repo_root / "agents" / "policy" / "policy.yaml"
@@ -245,15 +213,13 @@ async def run_agent(repo_root: Path, role_name: str) -> int:
     if not self_id:
         log.error("policy.yaml has no participant id for %s (run `sindarin bootstrap`)", role_name)
         return 1
-    workdir = values.get("CODER_WORKDIR") or os.environ.get("CODER_WORKDIR")
     ctx = RoleContext(
         role=role_name,
         repo_root=repo_root,
         policy_path=policy_path,
         users_path=users_path,
         self_id=self_id,
-        github=github_for(role_name, repo_root, values),
-        workdir=Path(workdir) if workdir else None,
+        ledger=ledger_for(repo_root),
     )
     model_call = ScriptedModel(role.fake_step(ctx)) if fake else anthropic_model_call()
     client = SwitchClient(

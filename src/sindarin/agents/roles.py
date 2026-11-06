@@ -9,13 +9,16 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from sindarin.agents.base import Outgoing, RoleAgent, Tool, Turn
-from sindarin.agents.github_client import AgentGitHub
+from sindarin.ledger import Ledger
 from sindarin.policy import Policy, load_policy
 from sindarin.switch.events import MessageEvent
 from sindarin.users import Users, load_users
 
-SPEC_ID_RE = re.compile(r"\bSPEC-\d+\b")
-PENDING_RE = re.compile(r"\*\*((?:SPEC|PR|REL)-\d+)\*\* pending")
+PLAN_ID_RE = re.compile(r"\bGOALS-\d+\b")
+BUDGET_ID_RE = re.compile(r"\bBUDGET-\d+\b")
+# the goals posted into a plan room by sindarin-switch (its brief): context, never a call to act
+BRIEF_RE = re.compile(r"\*\*(GOALS-\d+)\*\* instructions", re.IGNORECASE)
+PENDING_RE = re.compile(r"\*\*((?:GOALS|BUDGET|ENTRIES)-\d+)\*\* pending")
 
 
 @dataclass
@@ -25,16 +28,11 @@ class RoleContext:
     policy_path: Path
     users_path: Path
     self_id: str
-    github: AgentGitHub | None = None
+    ledger: Ledger | None = None  # read-only; every number an agent shows comes from it
     memory: dict[str, Any] = field(default_factory=dict)
     room_names: dict[str, str] = field(
-        default_factory=lambda: {
-            "product": "#product",
-            "releases": "#releases",
-            "customer": "#acme-shared",
-        }
+        default_factory=lambda: {"finance": "#acme-finance", "planning": "#planning"}
     )
-    workdir: Path | None = None  # the coder's working clone, when it has one
 
     def policy(self) -> Policy:
         return load_policy(self.policy_path)
@@ -51,7 +49,7 @@ class RoleContext:
             return self.room_names.get(key, f"#{key}")
         return self.memory.get("room_names", {}).get(room_id, "this room")
 
-    def is_feature_room(self, room_id: str) -> bool:
+    def is_period_room(self, room_id: str) -> bool:
         return bool(room_id) and self.room_key(room_id) is None
 
     def executor_ids(self) -> set[str]:
@@ -107,6 +105,18 @@ def spoken_to(ev: MessageEvent, ctx: RoleContext, thread: list[Turn]) -> bool:
     )
 
 
+def tool_facts_text(ctx: RoleContext, room_id: str) -> str:
+    """What this agent's tools did in the room so far (base.fact_line), for the next turn."""
+    facts = ctx.memory.get("tool_facts", {}).get(room_id, [])
+    if not facts:
+        return ""
+    lines = "\n".join(f"- {f}" for f in facts[-12:])
+    return (
+        "# What your tools did in this room (facts; your earlier posts here came from these)\n"
+        + lines
+    )
+
+
 def build_agent(role: Role, ctx: RoleContext, model_call, *, room_id: str = "") -> RoleAgent:
     agent_md = ctx.repo_root / "agents" / role.NAME / "AGENT.md"
     return RoleAgent(
@@ -114,7 +124,9 @@ def build_agent(role: Role, ctx: RoleContext, model_call, *, room_id: str = "") 
         agent_md=agent_md,
         tools=role.tools(ctx),
         model_call=model_call,
-        context=lambda: role.context_text(ctx, room_id),
+        context=lambda: "\n\n".join(
+            p for p in (role.context_text(ctx, room_id), tool_facts_text(ctx, room_id)) if p
+        ),
         max_turns=getattr(role, "MAX_TURNS", 8),
     )
 

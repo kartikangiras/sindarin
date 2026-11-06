@@ -8,9 +8,11 @@ proposal or a review. The agent decides nothing; the executors re-verify every f
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -26,14 +28,14 @@ MODEL = (
 EFFORT = os.environ.get("SINDARIN_EFFORT", "high")
 REFUSAL = "I can only post what the validator produced. Rephrasing."
 FENCE_RE = re.compile(r"```sindarin-[a-z]+[ \t]*\r?\n.*?\r?\n[ \t]*```", re.DOTALL)
-ID_RE = re.compile(r"\b(?:SPEC|PR|REL)-\d+\b")
+ID_RE = re.compile(r"\b(?:GOALS|BUDGET|ENTRIES)-\d+\b")
 
 MESSAGE_RULES = """
 # Message rules (every message, no exceptions)
 1. One to three lines. Humans write paragraphs; you never do. A fenced block does not count.
 2. Name who you are talking to with an @mention and answer in the thread you were asked in.
    Mention people by the display name the header gives (`@Isaac`), never by participant id;
-   participant ids appear only as tool arguments (the spec's `engineer`).
+   participant ids and message ids appear only as tool arguments.
    The header in square brackets is context for you, never content for the room: no room ids,
    thread ids, participant ids or "replying in thread …" narration in a message.
 3. Acknowledge and act in the same message: "On it. Drafting the spec in #product."
@@ -43,8 +45,11 @@ MESSAGE_RULES = """
 7. At most one emoji, as a status mark. Bold for values and room names. No headers, no bullets.
 8. You never approve, never address an executor with a command, never say "approved".
    The decision goes to the executor: your last line is "Your call." followed by the exact
-   command the human types, for example `@sindarin-github approve PR-41`.
+   command the human types, for example `@sindarin-ledger approve BUDGET-1`.
 9. One artifact id per message.
+10. What you posted earlier in this thread came through your tools and the validator; the
+    context lists what those tools did. Never call your earlier posts made up, hand-written
+    or unverified. If a fact changed, state the new fact and where it came from.
 """
 
 
@@ -116,6 +121,7 @@ class RoleAgent:
         self.model = model
         self.effort = effort
         self.max_turns = max_turns
+        self.tool_log: list[str] = []  # what the tools did in the last respond(), one line each
 
     # -- prompt -------------------------------------------------------------------------------
 
@@ -153,6 +159,7 @@ class RoleAgent:
         system = self.system_prompt()
         tool_outputs: set[str] = set()
         last_fenced: str | None = None  # the newest validator-produced block, if any
+        self.tool_log = []
         for _ in range(self.max_turns):
             response = self.model_call(
                 model=self.model,
@@ -188,6 +195,8 @@ class RoleAgent:
                 if ok and FENCE_RE.search(out):
                     tool_outputs.add(out.strip())
                     last_fenced = out.strip()
+                if ok:
+                    self.tool_log.append(fact_line(tu.name, dict(tu.input or {}), out))
                 log.info("%s.%s → %s", self.role, tu.name, "ok" if ok else out[:80])
                 results.append(
                     {
@@ -224,6 +233,29 @@ class RoleAgent:
             if fence and fence.group(0) in kept:
                 kept = kept.replace(fence.group(0), out, 1)
         return kept
+
+
+_FACT_KEYS = ("target", "number", "snapshot_hint", "head_sha", "pr", "summary", "tag", "version")
+
+
+def fact_line(name: str, inp: dict[str, Any], out: str) -> str:
+    """One line a later turn can rely on: the tool, its arguments and what came back. Kept per
+    room so the model knows its earlier posts were tool-made (a model that sees only its own
+    text later tends to disown it; seen live 2026-11-06)."""
+    args = json.dumps(inp, sort_keys=True, default=str)
+    if len(args) > 120:
+        args = args[:117] + "…"
+    found = [
+        f"{k} {m.group(1)}"
+        for k in _FACT_KEYS
+        if (m := re.search(rf'"{k}"\s*:\s*"?([^",}}]+)"?', out))
+    ]
+    summary = (
+        ", ".join(found)
+        if found
+        else next((ln.strip() for ln in out.splitlines() if ln.strip()), "ok")[:120]
+    )
+    return f"{name}({args}) → {summary} · {time.strftime('%H:%M', time.gmtime())} UTC"
 
 
 def _as_params(blocks: list[Any]) -> list[dict[str, Any]]:
