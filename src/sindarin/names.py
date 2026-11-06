@@ -7,7 +7,9 @@ executor, trusted). Identity never depends on these names: every check uses part
 ANALYST = "analyst"
 PLANNER = "planner"
 BOOKKEEPER = "bookkeeper"
-AGENT_ROLES: tuple[str, ...] = (ANALYST, PLANNER, BOOKKEEPER)
+TREASURY = "treasury"
+SALES = "sales"
+AGENT_ROLES: tuple[str, ...] = (ANALYST, PLANNER, BOOKKEEPER, TREASURY, SALES)
 
 SWITCH_EXECUTOR = "sindarin-switch"
 LEDGER_EXECUTOR = "sindarin-ledger"
@@ -17,14 +19,21 @@ DISPLAY = {
     ANALYST: "Analyst",
     PLANNER: "Planner",
     BOOKKEEPER: "Bookkeeper",
+    TREASURY: "Treasury",
+    SALES: "Sales",
     SWITCH_EXECUTOR: "Sindarin Switch",
     LEDGER_EXECUTOR: "Sindarin Ledger",
 }
 
-# which executor owns which artifact kind (design v5 §5): the goals open the plan room (Switch);
-# the budget and its register entries are written into the books (the ledger)
+# which executor owns which artifact kind (design v5 §5): the goals and the close plan open
+# their rooms (Switch); budgets, register entries, payment runs and locks are written into the
+# books (the ledger)
 EXECUTOR_OF_KIND = {
     "goals": SWITCH_EXECUTOR,
     "budget": LEDGER_EXECUTOR,
     "entries": LEDGER_EXECUTOR,
+    "close": SWITCH_EXECUTOR,
+    "pay": LEDGER_EXECUTOR,
+    "lock": LEDGER_EXECUTOR,
+    "deal": LEDGER_EXECUTOR,
 }

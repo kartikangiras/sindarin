@@ -1,4 +1,4 @@
-# sindarin-ledger (design v5 §5). Owns BUDGET-n and ENTRIES-n; the only process that writes ledger_db.
+# sindarin-ledger (design v5 §5). Owns BUDGET-n, ENTRIES-n, PAY-n and LOCK-n; the only process that writes ledger_db.
 # Secrets live in the root .env, never here.
 executor: sindarin-ledger
 room_names:
@@ -18,6 +18,7 @@ post_audit_lines: false
 status_fences: false
 ledger_db: books.db
 data_dir: ../data/acme
+sheet_url: ''
 room_creation: gateway
 addressing: rooms
 bridge_id: ''

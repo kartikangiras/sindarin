@@ -93,6 +93,10 @@ class MattermostClient:
         )
         return user, True
 
+    def set_password(self, user_id: str, new_password: str) -> None:
+        """Admin: set a user's password (clears Mattermost's failed-login lock as well)."""
+        self._req("PUT", f"/users/{user_id}/password", json={"new_password": new_password})
+
     # -- teams and channels ---------------------------------------------------------------------
 
     def team_by_name(self, name: str) -> dict[str, Any]:

@@ -28,7 +28,7 @@ MODEL = (
 EFFORT = os.environ.get("SINDARIN_EFFORT", "high")
 REFUSAL = "I can only post what the validator produced. Rephrasing."
 FENCE_RE = re.compile(r"```sindarin-[a-z]+[ \t]*\r?\n.*?\r?\n[ \t]*```", re.DOTALL)
-ID_RE = re.compile(r"\b(?:GOALS|BUDGET|ENTRIES)-\d+\b")
+ID_RE = re.compile(r"\b(?:GOALS|BUDGET|ENTRIES|CLOSE|PAY|LOCK|DEAL)-\d+\b")
 
 MESSAGE_RULES = """
 # Message rules (every message, no exceptions)

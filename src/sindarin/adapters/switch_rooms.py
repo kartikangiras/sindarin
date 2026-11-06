@@ -37,6 +37,9 @@ class RoomsGateway(Protocol):
         agent_ids: list[str],
         user_names: list[str],
     ) -> dict[str, Any]: ...
+    # optional Switch components (the live Gateway has them; a fake may not)
+    # create_document(...) -> str · attach_document(room, doc) · link_rooms(room, target, label)
+    # ensure_room_group(name) -> str · group_rooms(id) -> list · assign_rooms_to_group(id, rooms)
     def room_members(self, room_id: str) -> dict[str, list[str]]: ...
     def add_room_agents(self, room_id: str, agent_ids: list[str]) -> None: ...
     def add_room_users(self, room_id: str, user_names: list[str]) -> None: ...
@@ -51,7 +54,7 @@ SETTLE_SECONDS = 3.0
 
 class SwitchRoomsAdapter:
     platform = "switch"
-    kinds = frozenset({Kind.GOALS})
+    kinds = frozenset({Kind.GOALS, Kind.CLOSE})
 
     def __init__(
         self,
@@ -69,6 +72,8 @@ class SwitchRoomsAdapter:
         self.channel_type = channel_type
         self.scoped_addressing = scoped_addressing
         self.settle_seconds = SETTLE_SECONDS if settle_seconds is None else settle_seconds
+        self.home_room_id = ""  # #acme-finance: the room the new one is linked from
+        self.group_name = "Acme finance"  # the Switch room group the new room joins
 
     def read_facts(self, proposal: Proposal) -> Facts:
         return Facts(ok=True, data={})
@@ -106,6 +111,8 @@ class SwitchRoomsAdapter:
                     description=(
                         f"Plan room for {a.id}: {body.title}. The budget register entries are "
                         "approved here."
+                        if a.kind is Kind.GOALS
+                        else f"Period room for {a.id}: {body.title}. The lock is approved here."
                     ),
                     instructions=plan_instructions(proposal),
                     bridge_id=self.bridge_id,
@@ -125,6 +132,7 @@ class SwitchRoomsAdapter:
         except Exception as exc:  # the Gateway's words are safe to show; its cookie is not
             raise AdapterError(f"Gateway: {str(exc)[:160]}") from None
         widened = self._widen_addressing(str(room.get("id") or ""), agents)
+        extras = self._dress(str(room.get("id") or ""), a, proposal) if existing is None else {}
         if existing is None:
             self._settle(str(room.get("id") or ""), agents, users)
         return ActionResult(
@@ -134,8 +142,44 @@ class SwitchRoomsAdapter:
                 "room_name": slug,
                 "members": len(agents) + len(users),
                 "addressing_widened": widened,
+                **extras,
             },
         )
+
+    def _dress(self, room_id: str, a: Artifact, proposal: Proposal) -> dict[str, Any]:
+        """The Switch components around the new room, each fail-soft: the brief as a Switch
+        document attached to it, a link from the home room, membership of the finance group."""
+        out: dict[str, Any] = {}
+        body: Any = proposal.body
+        gw: Any = self.gateway
+        if hasattr(gw, "create_document"):
+            try:
+                doc = gw.create_document(
+                    name=f"{a.id} · {body.title}",
+                    description=(
+                        f"The brief of {a.id}, approved by {a.approver_name or 'the approver'}."
+                    ),
+                    instructions="Read before acting in this room. Agents propose; people decide.",
+                    content=plan_instructions(proposal),
+                )
+                gw.attach_document(room_id, doc)
+                out["document_id"] = doc
+            except Exception as exc:
+                log.warning("document not attached: %s", str(exc)[:120])
+        if self.home_room_id and hasattr(gw, "link_rooms"):
+            try:
+                gw.link_rooms(self.home_room_id, room_id, f"opened by {a.id}")
+                out["linked_from"] = self.home_room_id
+            except Exception as exc:
+                log.warning("rooms not linked: %s", str(exc)[:120])
+        if self.group_name and hasattr(gw, "put_room_group"):
+            try:
+                gid = gw.ensure_room_group(self.group_name)
+                gw.put_room_group(room_id, gid)
+                out["group"] = self.group_name
+            except Exception as exc:
+                log.warning("room not grouped: %s", str(exc)[:120])
+        return out
 
     def _settle(self, room_id: str, agents: list[str], users: list[str]) -> None:
         """Wait until the Gateway lists every member, then a grace period for the bridge, so the

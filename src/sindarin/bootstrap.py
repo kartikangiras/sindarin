@@ -37,7 +37,9 @@ from sindarin.names import (
     DISPLAY,
     LEDGER_EXECUTOR,
     PLANNER,
+    SALES,
     SWITCH_EXECUTOR,
+    TREASURY,
 )
 from sindarin.switch.client import ConnectionState, SwitchClient, SwitchError
 from sindarin.switch.events import MessageEvent
@@ -142,16 +144,27 @@ AGENTS: dict[str, tuple[str, str]] = {
     ),
     BOOKKEEPER: (
         DISPLAY[BOOKKEEPER],
-        "Proposes the budget register entries once the budget is recorded. Cannot post.",
+        "Proposes the budget register entries once a budget is recorded, the month's close plan "
+        "when asked, and the lock once the payment run is paid. Cannot post or lock.",
+    ),
+    TREASURY: (
+        DISPLAY[TREASURY],
+        "Proposes the payment run for an approved month's plan from the ledger's open payables. "
+        "Cannot pay.",
+    ),
+    SALES: (
+        DISPLAY[SALES],
+        "Registers a deal at a price against the ledger's price book; the discount band picks "
+        "who approves. Cannot discount, cannot book.",
     ),
     SWITCH_EXECUTOR: (
         DISPLAY[SWITCH_EXECUTOR],
-        "Deterministic. Verifies the CFO's approval by participant id and opens the plan room.",
+        "Deterministic. Verifies approvals by participant id and opens the plan and period rooms.",
     ),
     LEDGER_EXECUTOR: (
         DISPLAY[LEDGER_EXECUTOR],
-        "Deterministic. Verifies approvals by participant id, records the budget and posts its "
-        "register entries. The only process that writes the ledger.",
+        "Deterministic. Verifies approvals by participant id; records budgets, posts register "
+        "entries, pays payables and locks periods. The only process that writes the ledger.",
     ),
 }
 
@@ -170,13 +183,13 @@ ROOMS: dict[str, RoomSpec] = {
     "acme-finance": RoomSpec(
         "finance",
         "channel_public",
-        (ANALYST, PLANNER, SWITCH_EXECUTOR),
+        (ANALYST, PLANNER, BOOKKEEPER, SWITCH_EXECUTOR),
         ("isaac", "john", "leonardo"),
-        "Acme's finance room. The month is asked for, reported and its goals set here; the "
-        "board is pinned here.",
-        "The business asks `@analyst @planner plan <month>`. @analyst reports the basis month; "
-        "@planner proposes the goals as a `sindarin-proposal` fence. Only the cfo's "
-        "`@sindarin-switch approve GOALS-n` opens the plan room. deny / changes / status / "
+        "Acme's finance room. A month is planned or closed from here; the board is pinned here.",
+        "The business asks `@analyst @planner plan <month>` or `@analyst @bookkeeper close "
+        "<month>`. @analyst reports; @planner proposes the goals, @bookkeeper the close plan, as "
+        "`sindarin-proposal` fences. `@sindarin-switch approve GOALS-n` (cfo) opens the plan "
+        "room; `approve CLOSE-n` (controllers) the period room. deny / changes / status / "
         "whoami / help / board / brief.",
     ),
     "planning": RoomSpec(
@@ -187,6 +200,29 @@ ROOMS: dict[str, RoomSpec] = {
         "Budgets are proposed and approved here. Approve with `@sindarin-ledger approve BUDGET-n`.",
         "@planner proposes the budget under the approved cap. Only `@sindarin-ledger approve "
         "BUDGET-n` from the cfo records it (the board above the limit). deny / changes / "
+        "status / whoami / help.",
+    ),
+    "payments": RoomSpec(
+        "payments",
+        "channel_private",
+        (TREASURY, LEDGER_EXECUTOR),
+        ("john", "leonardo"),
+        "Payment runs are proposed and approved here. Approve with `@sindarin-ledger approve "
+        "PAY-n`.",
+        "@treasury proposes the payment run of an approved plan. Only the cfo's "
+        "`@sindarin-ledger approve PAY-n` pays (controllers below the limit). deny / changes / "
+        "status / whoami / help.",
+    ),
+    "sales": RoomSpec(
+        "sales",
+        "channel_private",
+        (SALES, LEDGER_EXECUTOR),
+        ("vincent", "john", "leonardo"),
+        "Deals are registered and approved here. Approve with `@sindarin-ledger approve DEAL-n`.",
+        "Ask `@sales deal <account> on <product> at <price>` (terms standard, net60 or sla). "
+        "@sales proposes the deal against the price book. Only `@sindarin-ledger approve DEAL-n` "
+        "from the cfo wins it (controllers below the discount limit) and lands the sale in the "
+        "books. `@sindarin-ledger price <product> <amount>` edits a list price. deny / changes / "
         "status / whoami / help.",
     ),
 }
@@ -403,9 +439,13 @@ def render_policy(ids: dict[str, str], rooms: dict[str, str], people: list[Perso
     outsiders = [p.display for p in people if not p.groups]
     if outsiders:
         groups += f"\n  # {', '.join(outsiders)}: in no group (sales approves nothing)"
-    proposers = "\n".join(f'  {r}: "{pid(r)}"' for r in (ANALYST, PLANNER, BOOKKEEPER))
+    proposers = "\n".join(
+        f'  {r}: "{pid(r)}"' for r in (ANALYST, PLANNER, BOOKKEEPER, TREASURY, SALES)
+    )
     executors = "\n".join(f'  {e}: "{pid(e)}"' for e in (SWITCH_EXECUTOR, LEDGER_EXECUTOR))
-    room_lines = "\n".join(f'  {k}: "{rooms.get(k, "")}"' for k in ("finance", "planning"))
+    room_lines = "\n".join(
+        f'  {k}: "{rooms.get(k, "")}"' for k in ("finance", "planning", "payments", "sales")
+    )
     return f"""# Sindarin policy (design v5 §6). Agents draft from it; both executors enforce it.
 # Every id is a Switch participant id; nothing in this file is a display name.
 # `sindarin bootstrap` writes the ids and room ids. Learn yours with "@sindarin-switch whoami".
@@ -446,6 +486,39 @@ rules:
     proposer: bookkeeper
     approvers: controllers
     room: period             # the plan room the goals opened
+    currency: USD
+    pending_ttl: 24h
+  - name: close
+    kind: close
+    proposer: bookkeeper
+    approvers: controllers
+    also_invite: cfo          # sits in the period room too
+    room: finance
+    currency: USD
+    pending_ttl: 24h
+  - name: pay
+    kind: pay
+    proposer: treasury
+    approvers: cfo
+    approvers_under_limit: controllers
+    limit_cents: 1000000      # 10,000.00 USD: below it a controller may approve
+    room: payments
+    currency: USD
+    pending_ttl: 24h
+  - name: lock
+    kind: lock
+    proposer: bookkeeper
+    approvers: controllers
+    room: period             # the period room the plan opened
+    currency: USD
+    pending_ttl: 24h
+  - name: deal
+    kind: deal
+    proposer: sales
+    approvers: cfo
+    approvers_under_limit: controllers
+    limit_cents: 100000       # a 1,000.00 USD discount: below it a controller may approve
+    room: sales
     currency: USD
     pending_ttl: 24h
 """
@@ -685,6 +758,7 @@ def run_bootstrap(
         _finish_files(repo, rep, write_ids=False)
         admin.close()
         return rep
+    _switch_extras(admin, rep)
 
     # 5. participant ids (verify item 2): a private probe room holds all five agents
     # and the four people. We watch sindarin-switch's stream while the other agents post markers
@@ -745,6 +819,15 @@ def run_bootstrap(
                 try:
                     u = MattermostClient.login(mm_url, person.username, person.password)
                 except MattermostError:
+                    u = None
+                    if person.everywhere and person.username in rep.people:
+                        # the driver's account came with the stack and its seeded password is
+                        # not ours to know: set the demo password so one person can drive it
+                        with contextlib.suppress(MattermostError):
+                            mm.set_password(rep.people[person.username]["id"], person.password)
+                            u = MattermostClient.login(mm_url, person.username, person.password)
+                            rep.say(f"mattermost user {person.username}: demo password set")
+                if u is None:
                     # an account we do not hold the password of: the id is stable by
                     # construction (spike item 2); `whoami` in #acme-finance confirms it
                     rep.participant_ids[person.username] = (
@@ -840,24 +923,63 @@ def run_bootstrap(
     return rep
 
 
+def _switch_extras(admin: GatewayClient, rep: Report) -> None:
+    """The Switch components around the demo, fail-soft: the rooms in one room group, and a
+    usage budget on every LLM agent (Switch's own cap, beside the gates)."""
+    try:
+        gid = admin.ensure_room_group(
+            "Acme finance", "Sindarin: the finance rooms and the rooms it opens"
+        )
+        for rid in rep.rooms.values():
+            admin.put_room_group(rid, gid)
+        rep.say(f"room group 'Acme finance': {len(rep.rooms)} rooms")
+    except GatewayError as exc:
+        rep.say(f"room group: not set ({str(exc)[:80]})")
+    budgets = 0
+    try:
+        capped = {
+            str(b.get("agent_id")) for b in admin.budgets() if b.get("metric") == "output_tokens"
+        }
+    except GatewayError:
+        capped = set()
+    for handle, a in rep.agents.items():
+        if handle in (SWITCH_EXECUTOR, LEDGER_EXECUTOR) or a["id"] in capped:
+            continue  # the executors run no model; a capped agent keeps its budget
+        try:
+            admin.create_budget(
+                a["id"], metric="output_tokens", amount_limit=200000, period_hours=24
+            )
+            budgets += 1
+        except GatewayError as exc:
+            rep.say(f"budget {handle}: not set ({str(exc)[:80]})")
+            break
+    if budgets or capped:
+        rep.say(
+            f"budgets: {budgets + len(capped)} agents capped at 200,000 output tokens a day "
+            "by Switch"
+        )
+
+
 def _set_addressing(admin: GatewayClient, rep: Report, mode: str) -> None:
     """Layer 0: each agent may be addressed only in the rooms it belongs to (`rooms`), or by
     anyone (`open`). Plan rooms are added by sindarin-switch when it opens them. The probe
     room is included so ids can be re-learned. Verified live 2026-11-05 (§12.4 item 5): a
     mention from elsewhere arrives `addressed: false` and Switch refuses it in the room."""
     if mode != "rooms":
-        rep.say("addressing: anyone, for all five (the executors refuse in code)")
+        rep.say("addressing: anyone, for all six (the executors refuse in code)")
         return
     listing = rooms_on(admin, rep.bridge_id)
     probe = [str(r.get("id")) for r in listing if r.get("name") == PROBE_ROOM and r.get("id")]
     plan_rooms = [
         str(r.get("id"))
         for r in listing
-        if str(r.get("name", "")).startswith("plan-") and not r.get("archived") and r.get("id")
+        if str(r.get("name", "")).startswith(("plan-", "close-"))
+        and not r.get("archived")
+        and r.get("id")
     ]
     for handle, a in rep.agents.items():
         rooms = [rep.rooms[name] for name, spec in ROOMS.items() if handle in spec.agents]
-        if handle in (PLANNER, BOOKKEEPER, LEDGER_EXECUTOR, SWITCH_EXECUTOR):
+        if handle in (PLANNER, BOOKKEEPER, TREASURY, LEDGER_EXECUTOR, SWITCH_EXECUTOR):
             rooms += plan_rooms
         rooms += probe
         try:
@@ -865,8 +987,8 @@ def _set_addressing(admin: GatewayClient, rep: Report, mode: str) -> None:
         except GatewayError as exc:
             rep.fail(f"addressing {handle}: {exc}")
     rep.say(
-        "addressing: room-scoped for all five (Switch refuses a mention from elsewhere on the "
-        "agent's behalf; the executors still refuse in code inside their rooms)"
+        f"addressing: room-scoped for all {len(rep.agents)} (Switch refuses a mention from "
+        "elsewhere on the agent's behalf; the executors still refuse in code inside their rooms)"
     )
 
 

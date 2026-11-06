@@ -1,4 +1,4 @@
-# sindarin-switch (design v5 §5). Owns GOALS-n and the board. Secrets live in the root .env, never here.
+# sindarin-switch (design v5 §5). Owns GOALS-n, CLOSE-n and the board. Secrets live in the root .env, never here.
 # Room ids and participant ids are in agents/policy/policy.yaml; bootstrap writes both.
 executor: sindarin-switch
 room_names:
@@ -18,6 +18,7 @@ post_audit_lines: false
 status_fences: false
 ledger_db: books.db
 data_dir: ../data/acme
+sheet_url: ''
 room_creation: gateway
 addressing: rooms
 bridge_id: b76af5d9-670f-4573-9f7b-6655cdb00753
@@ -26,6 +27,8 @@ directory:
   '@switch-agent-cc9230bb:localhost': 22f3d8be-c304-46aa-8dc7-585141784ffc
   '@switch-agent-339ae16b:localhost': cb0f7fa5-8f8d-4504-a689-8450f9062e95
   '@switch-agent-9648f6fe:localhost': 4b44478a-b522-41c9-a553-6089e52a7416
+  '@switch-agent-f8ca89d0:localhost': 390d2222-6e91-4836-8f31-a96aff5056d3
+  '@switch-agent-b0b973e0:localhost': ecf7e31b-fcbb-4950-a184-26432cc71829
   '@switch-agent-99c39840:localhost': 045c61eb-0262-4f79-af57-aca715aa60d5
   '@switch-agent-fe792a08:localhost': 6a31fc37-09bd-4373-a081-c3a3c3fdd63d
   '@switch-mattermost-b76af5d9-670f-4573-9f7b-6655cdb00753-user:localhost': user

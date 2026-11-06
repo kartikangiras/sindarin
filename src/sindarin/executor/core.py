@@ -25,6 +25,7 @@ from sindarin.names import (
     LEDGER_EXECUTOR,
     PLANNER,
     SWITCH_EXECUTOR,
+    TREASURY,
 )
 from sindarin.policy import (
     PERIOD_ROOM,
@@ -36,11 +37,14 @@ from sindarin.policy import (
 )
 from sindarin.schema import (
     FAILURE_OF,
+    HEAD_OF,
     IN_FLIGHT_STATES,
     PLATFORM_OF,
     PROPOSAL_FENCE,
     RETRY_STATES,
+    ROOM_KINDS,
     RUNNING_OF,
+    STANDALONE_KINDS,
     SUCCESS_OF,
     WAITING_STATES,
     Artifact,
@@ -141,6 +145,68 @@ class SetValue:
     value: str
 
 
+@dataclass(frozen=True)
+class RunReport:
+    """Runner: sindarin-switch renders a report, an export or a chart from its read-only ledger
+    handle and posts it, a file through Switch attachments when it can."""
+
+    what: str  # report | export | chart
+    period: str
+    subject: str  # the table or the chart kind, "" for a report
+    room_id: str
+    thread_id: str | None
+    actor_id: str
+    actor_name: str
+
+
+@dataclass(frozen=True)
+class BookSale:
+    """Runner: the ledger adapter books a late sale a person typed, then posts the outcome."""
+
+    invoice: str
+    customer: str
+    amount_cents: int
+    room_id: str
+    thread_id: str | None
+    actor_id: str
+    actor_name: str
+
+
+@dataclass(frozen=True)
+class SetPrice:
+    """Runner: the ledger adapter edits a list price a person typed, then posts the outcome."""
+
+    product: str
+    amount_cents: int
+    room_id: str
+    thread_id: str | None
+    actor_id: str
+    actor_name: str
+
+
+@dataclass(frozen=True)
+class InspectFile:
+    """Runner: fetch the file a person linked, describe it (or list one tab's entries), post."""
+
+    url: str
+    tab: str
+    room_id: str
+    thread_id: str | None
+    actor_id: str
+    actor_name: str
+
+
+@dataclass(frozen=True)
+class LoadBooks:
+    """Runner: fetch the file a person linked and, if the books can take it, load it."""
+
+    url: str
+    room_id: str
+    thread_id: str | None
+    actor_id: str
+    actor_name: str
+
+
 Effect = (
     Post
     | Audit
@@ -152,6 +218,11 @@ Effect = (
     | Execute
     | Verify
     | SetValue
+    | BookSale
+    | SetPrice
+    | InspectFile
+    | LoadBooks
+    | RunReport
 )
 
 
@@ -308,13 +379,46 @@ def summarize(ctx: Context, a: Artifact) -> str:
         under = f" under the cap {money(int(cap), body.currency)}" if cap is not None else ""
         total = money(body.total_cents, body.currency)
         return f"{n} line{'s' if n != 1 else ''} · {total}{under} · {body.goals}"
-    n = len(body.lines)
-    total = money(body.total_cents)
-    return f"period {body.period} · {n} line{'s' if n != 1 else ''} · {total} · {body.budget}"
+    if a.kind is Kind.ENTRIES:
+        n = len(body.lines)
+        total = money(body.total_cents)
+        return f"period {body.period} · {n} line{'s' if n != 1 else ''} · {total} · {body.budget}"
+    if a.kind is Kind.CLOSE:
+        n = len(body.payables)
+        pay = (
+            f"{n} payable{'s' if n != 1 else ''} {money(body.total_payables_cents, body.currency)}"
+            if n
+            else "no payables"
+        )
+        e = len(body.entries)
+        return f"{body.title} · {e} adjusting entr{'y' if e == 1 else 'ies'} · {pay}"
+    if a.kind is Kind.PAY:
+        total = int(facts.get("total_cents", body.total_cents))
+        n = len(body.run)
+        return f"{n} payable{'s' if n != 1 else ''} · {money(total, body.currency)} · {body.plan}"
+    if a.kind is Kind.DEAL:
+        return (
+            f"{body.deal_id} · {body.account} · {body.product} at "
+            f"{money(body.price_cents, body.currency)} (list "
+            f"{money(body.list_cents, body.currency)}, {percent(body.discount_bps)} off) · "
+            f"{body.period}"
+        )
+    e = len(body.entries)
+    tail = f" · after {body.pay_run}" if body.pay_run else ""
+    return f"period {body.period} · {e} entr{'y' if e == 1 else 'ies'} · {body.plan}{tail}"
 
 
 def action_phrase(a: Artifact, result: dict[str, Any]) -> str:
     body: Any = a.proposal().body
+    if a.kind is Kind.DEAL:
+        return f"won · sale {money(body.price_cents, body.currency)} posted to {body.period}"
+    if a.kind is Kind.PAY:
+        total = int(result.get("total_cents", body.total_cents))
+        n = int(result.get("paid", len(body.run)))
+        return f"paid {money(total, body.currency)} · {n} payable{'s' if n != 1 else ''}"
+    if a.kind is Kind.LOCK:
+        n = int(result.get("entries_posted", len(body.entries)))
+        return f"{n} entr{'y' if n == 1 else 'ies'} posted · period {body.period} locked"
     if a.kind is Kind.BUDGET:
         n = int(result.get("lines", len(body.lines)))
         return (
@@ -327,18 +431,18 @@ def action_phrase(a: Artifact, result: dict[str, Any]) -> str:
     return f"room **#{room.lstrip('#')}** opened"
 
 
-def _goals_plan(ctx: Context, proposal: Proposal, rule: Rule) -> dict[str, Any]:
-    """The membership a goals approval binds to (design v5 §3): the cfo, the group the rule
-    also invites (the controllers), the planner, the bookkeeper, sindarin-ledger and
+def _room_plan(ctx: Context, proposal: Proposal, rule: Rule) -> dict[str, Any]:
+    """The membership a room-opening approval binds to (design v5 §3): the approvers, the
+    group the rule also invites, the two agents of the chain, sindarin-ledger and
     sindarin-switch. Computed from policy, never from chat text."""
     humans = list(ctx.policy.group_members(rule.approvers))
     if rule.also_invite:
         humans += [p for p in ctx.policy.group_members(rule.also_invite) if p not in humans]
+    roles = (PLANNER, BOOKKEEPER) if proposal.kind is Kind.GOALS else (BOOKKEEPER, TREASURY)
     agents = [
         pid
         for pid in (
-            ctx.policy.proposer_id(PLANNER),
-            ctx.policy.proposer_id(BOOKKEEPER),
+            *(ctx.policy.proposer_id(r) for r in roles),
             ctx.ledger_executor_id,
             ctx.self_id,  # so the brief can be posted into the new room
         )
@@ -352,11 +456,39 @@ def _goals_plan(ctx: Context, proposal: Proposal, rule: Rule) -> dict[str, Any]:
     }
 
 
+_goals_plan = _room_plan  # the planning chain's name for it
+
+
 def plan_instructions(proposal: Proposal) -> str:
-    """The room instructions sindarin-switch sets on the plan room: the goals."""
+    """The room instructions sindarin-switch sets on the room it opens: the goals of a plan
+    room, the month's plan of a period room."""
     body: Any = proposal.body
     cur = body.currency
     lines = [f"# {body.title}", "", body.summary, ""]
+    if proposal.kind is Kind.CLOSE:
+        if body.report:
+            lines += ["## The month", *[f"- {r}" for r in body.report], ""]
+        lines.append("## Adjusting entries to post")
+        if body.entries:
+            lines += [
+                f"{i}. {e.memo} · {money(e.amount_cents, cur)}"
+                for i, e in enumerate(body.entries, 1)
+            ]
+        else:
+            lines.append("none")
+        lines += ["", "## Payables to pay"]
+        if body.payables:
+            lines += [f"- {inv}" for inv in body.payables]
+            lines.append(f"Total {money(body.total_payables_cents, cur)}")
+        else:
+            lines.append("none")
+        lines += [
+            "",
+            f"Payment runs are approved in #payments with `@{LEDGER_EXECUTOR} approve PAY-n`; "
+            f"the lock of {body.period} is approved here with `@{LEDGER_EXECUTOR} approve "
+            "LOCK-n`. Agents propose; only the named groups approve; the executor acts.",
+        ]
+        return "\n".join(lines)
     if body.report:
         lines += [f"## The basis: {body.basis}", *[f"- {r}" for r in body.report], ""]
     lines += [
@@ -390,8 +522,8 @@ def _goals_of(ctx: Context, proposal: Proposal) -> dict[str, Any]:
 
 
 def _live_facts(ctx: Context, a: Artifact, proposal: Proposal, rule: Rule) -> Facts:
-    if a.kind is Kind.GOALS:
-        return Facts(ok=True, data=_goals_plan(ctx, proposal, rule))
+    if a.kind in ROOM_KINDS:
+        return Facts(ok=True, data=_room_plan(ctx, proposal, rule))
     f = ctx.facts.get(proposal.target)
     if f is None:
         return Facts(ok=False, error="no fresh read of the target")
@@ -406,13 +538,38 @@ _MONEY_LABELS = {
     "cap_cents": "cost cap",
     "total_cents": "total",
     "revenue_target_cents": "revenue target",
+    "list_cents": "list price",
 }
-_PLAIN_LABELS = {"sales_rows": "sales rows", "period_status": "period", "basis_status": "basis"}
+_PLAIN_LABELS = {
+    "sales_rows": "sales rows",
+    "period_status": "period",
+    "basis_status": "basis",
+    "open_payables": "open payables",
+    "deal_stage": "deal",
+}
 
 
 def _what_changed(old: dict[str, Any], new: dict[str, Any], currency: str = "USD") -> str:
     """What moved between the snapshot and the ledger now, in the words a person reads."""
     parts: list[str] = []
+    if "payables" in old or "payables" in new:
+        before = {r["invoice"]: r for r in old.get("payables", [])}
+        after = {r["invoice"]: r for r in new.get("payables", [])}
+        for inv in sorted(set(before) | set(after)):
+            b, n = before.get(inv), after.get(inv)
+            if b == n:
+                continue
+            if b is None:
+                parts.append(f"{inv} appeared")
+            elif n is None:
+                parts.append(f"{inv} gone")
+            elif b["amount_cents"] != n["amount_cents"]:
+                was, now = money(b["amount_cents"], currency), money(n["amount_cents"], currency)
+                parts.append(f"{inv} {was} → {now}")
+            elif b["status"] != n["status"]:
+                parts.append(f"{inv} {b['status']} → {n['status']}")
+            else:
+                parts.append(f"{inv} changed")
     if "budget_lines" in old or "budget_lines" in new:
         before = {r["department"]: r for r in old.get("budget_lines", [])}
         after = {r["department"]: r for r in new.get("budget_lines", [])}
@@ -429,8 +586,18 @@ def _what_changed(old: dict[str, Any], new: dict[str, Any], currency: str = "USD
                 parts.append(f"{dep} {was} → {now}")
     basis = new.get("basis") or old.get("basis")
     for k in sorted(set(old) | set(new)):
-        if k in ("budget_lines", "digest", "accounts", "budget_id", "goals", "margin_target_bps"):
+        if k in (
+            "budget_lines",
+            "payables",
+            "digest",
+            "accounts",
+            "budget_id",
+            "goals",
+            "margin_target_bps",
+        ):
             continue
+        if k == "total_cents" and ("payables" in old or "payables" in new):
+            continue  # the rows above already say what moved
         if old.get(k) == new.get(k):
             continue
         if k in _MONEY_LABELS:
@@ -520,7 +687,7 @@ def handle_sweep(ctx: Context) -> list[Effect]:
         if a.kind in ctx.kinds:
             effects.append(Verify(a.id))
     if ctx.executor == SWITCH_EXECUTOR:
-        effects.extend(_goals_stages(ctx))
+        effects.extend(_switch_stages(ctx))
         effects.extend(_daily_board(ctx))
     else:
         effects.extend(_ledger_stages(ctx))
@@ -600,8 +767,8 @@ def _handle_proposal(ctx: Context, ev: MessageEvent) -> list[Effect]:
     if reason is not None:
         return _reject(ctx, ev, "order", f"{reason}.", kind=proposal.kind.value)
     # P4 — the snapshot comes from the ledger, never from the fence
-    if proposal.kind is Kind.GOALS:
-        facts = Facts(ok=True, data=_goals_plan(ctx, proposal, rule))
+    if proposal.kind in ROOM_KINDS:
+        facts = Facts(ok=True, data=_room_plan(ctx, proposal, rule))
     else:
         facts = ctx.facts.get(proposal.target) or Facts(ok=False, error="target not read")
         if not facts.ok:
@@ -661,50 +828,85 @@ def _handle_proposal(ctx: Context, ev: MessageEvent) -> list[Effect]:
     ]
 
 
-def _plan_named(ctx: Context, goals_id: str) -> Artifact | None:
-    """The approved goals an artifact names, from the other executor's state (read-only)."""
+def _plan_named(ctx: Context, head_id: str) -> Artifact | None:
+    """The approved head of a chain (the goals, or the month's plan) an artifact names, from
+    the other executor's state (read-only)."""
     pool = (
         ctx.peer_artifacts
-        if Kind.GOALS not in ctx.kinds
-        else tuple(ctx.view.in_states(State.OPEN, State.DONE, kind=Kind.GOALS))
+        if not (ROOM_KINDS & ctx.kinds)
+        else tuple(ctx.view.in_states(State.OPEN, State.DONE))
     )
-    return next((a for a in pool if a.kind is Kind.GOALS and a.id == goals_id), None)
+    return next((a for a in pool if a.kind in ROOM_KINDS and a.id == head_id), None)
+
+
+def _head_id(body: Any) -> str:
+    return str(getattr(body, "goals", None) or getattr(body, "plan", None) or "")
 
 
 def _order_check(ctx: Context, proposal: Proposal, thread: str) -> str | None:
     body: Any = proposal.body
-    if proposal.kind is Kind.GOALS:
-        # one set of goals per period: pending, opening, open or done, another one is refused
+    if proposal.kind in ROOM_KINDS:
+        # one head per period and chain: pending, opening, open or done, another one is refused
         taken = (*WAITING_STATES, *IN_FLIGHT_STATES, State.OPEN_FAILED, State.OPEN, State.DONE)
-        for a in ctx.view.in_states(*taken, kind=Kind.GOALS):
+        for a in ctx.view.in_states(*taken, kind=proposal.kind):
             if a.period == body.period and a.thread_id != thread:
                 return f"**{a.id}** is already {a.state.value} for {body.period}"
         return None
-    goals = _plan_named(ctx, body.goals)
-    if goals is None or goals.state not in (State.OPEN, State.DONE):
-        return f"{body.goals} are not approved goals yet; a {proposal.kind.value} follows the goals"
-    goals_body: Any = goals.proposal().body
-    if goals_body.period != body.period:
-        return f"{body.goals} is for {goals_body.period}, not {body.period}"
-    live = (*WAITING_STATES, *IN_FLIGHT_STATES, *RETRY_STATES)
-    if proposal.kind is Kind.BUDGET:
-        for a in ctx.view.in_states(*live, State.RECORDED, kind=Kind.BUDGET):
-            if a.proposal().body.goals == body.goals and a.thread_id != thread:
-                return f"**{a.id}** is already {a.state.value} for {body.goals}"
+    if proposal.kind in STANDALONE_KINDS:
+        # a deal stands alone: one live artifact per deal id
+        held = (*WAITING_STATES, *IN_FLIGHT_STATES, *RETRY_STATES, State.WON)
+        for a in ctx.view.in_states(*held, kind=proposal.kind):
+            if a.proposal().body.deal_id == body.deal_id and a.thread_id != thread:
+                return f"**{a.id}** is already {a.state.value} for {body.deal_id}"
         return None
-    recorded = [
-        a
-        for a in ctx.view.in_states(State.RECORDED, kind=Kind.BUDGET)
-        if a.proposal().body.goals == body.goals
-    ]
-    if not recorded:
-        return f"no budget is recorded for {body.goals} yet; the entries follow the budget"
-    if body.budget not in {a.id for a in recorded}:
-        return f"{body.budget} is not the recorded budget of {body.goals}"
-    for a in ctx.view.in_states(*live, kind=Kind.ENTRIES):
-        if a.proposal().body.goals == body.goals and a.thread_id != thread:
-            return f"**{a.id}** is already {a.state.value} for {body.goals}"
-    return None
+    head_id = _head_id(body)
+    head = _plan_named(ctx, head_id)
+    want = HEAD_OF[proposal.kind]
+    if head is None or head.kind is not want or head.state not in (State.OPEN, State.DONE):
+        noun = "approved goals" if want is Kind.GOALS else "an approved plan"
+        verb = "are" if want is Kind.GOALS else "is"
+        return f"{head_id} {verb} not {noun} yet; a {proposal.kind.value} follows the {want.value}"
+    head_body: Any = head.proposal().body
+    if head_body.period != body.period:
+        return f"{head_id} is for {head_body.period}, not {body.period}"
+    live = (*WAITING_STATES, *IN_FLIGHT_STATES, *RETRY_STATES)
+
+    def taken_by(kind: Kind, *states: State) -> str | None:
+        for a in ctx.view.in_states(*live, *states, kind=kind):
+            if _head_id(a.proposal().body) == head_id and a.thread_id != thread:
+                return f"**{a.id}** is already {a.state.value} for {head_id}"
+        return None
+
+    if proposal.kind is Kind.BUDGET:
+        return taken_by(Kind.BUDGET, State.RECORDED)
+    if proposal.kind is Kind.ENTRIES:
+        recorded = [
+            a
+            for a in ctx.view.in_states(State.RECORDED, kind=Kind.BUDGET)
+            if a.proposal().body.goals == head_id
+        ]
+        if not recorded:
+            return f"no budget is recorded for {head_id} yet; the entries follow the budget"
+        if body.budget not in {a.id for a in recorded}:
+            return f"{body.budget} is not the recorded budget of {head_id}"
+        return taken_by(Kind.ENTRIES)
+    if proposal.kind is Kind.PAY:
+        extra = [x.invoice for x in body.run if x.invoice not in head_body.payables]
+        if extra:
+            return f"{', '.join(extra)} not in the approved plan {head_id}"
+        return taken_by(Kind.PAY)
+    # LOCK: the plan's payables must be paid first, by a run of this plan
+    if head_body.payables:
+        paid = [
+            a
+            for a in ctx.view.in_states(State.PAID, kind=Kind.PAY)
+            if a.proposal().body.plan == head_id
+        ]
+        if not paid:
+            return f"{head_id} names payables; the lock follows their payment run being paid"
+        if body.pay_run and body.pay_run not in {a.id for a in paid}:
+            return f"{body.pay_run} is not a paid run of {head_id}"
+    return taken_by(Kind.LOCK)
 
 
 def _reproposal(
@@ -766,14 +968,18 @@ def pending_text(ctx: Context, a: Artifact, rule: Rule, *, revised: bool = False
     )
 
 
+_LIMITED_KINDS = (Kind.BUDGET, Kind.PAY, Kind.DEAL)  # a limit picks the group on the total read
+
+
 def _approver_phrase(ctx: Context, rule: Rule, a: Artifact) -> str:
-    total = a.facts().get("total_cents") if a.kind is Kind.BUDGET else None
+    total = a.facts().get("total_cents") if a.kind in _LIMITED_KINDS else None
     groups = rule.approver_groups(int(total) if total is not None else None)
     if len(groups) == 1:
         return f"one {groups[0]} approver"
+    what = "discount under" if a.kind is Kind.DEAL else "under"
     return (
         f"one {groups[0]} or {groups[1]} approver "
-        f"(under {money(rule.limit_cents or 0, rule.currency)})"
+        f"({what} {money(rule.limit_cents or 0, rule.currency)})"
     )
 
 
@@ -809,12 +1015,26 @@ def _handle_command(ctx: Context, ev: MessageEvent) -> list[Effect]:
             return [Post(ev.room_id, _status_one(ctx, a), thread_id=thread)]
         case cmd.Brief():
             return _brief(ctx, ev)
+        case cmd.Sale(invoice=invoice, amount_cents=cents, customer=customer):
+            return _sale(ctx, ev, invoice, cents, customer)
+        case cmd.Price(product=product, amount_cents=cents):
+            return _price(ctx, ev, product, cents)
+        case cmd.Read(url=url, tab=tab):
+            return _read_file(ctx, ev, url, tab)
+        case cmd.Load(url=url):
+            return _load(ctx, ev, url)
+        case cmd.Report(period=period):
+            return _report(ctx, ev, "report", period, "")
+        case cmd.Export(period=period, what=what):
+            return _report(ctx, ev, "export", period, what)
+        case cmd.Chart(period=period, what=what):
+            return _report(ctx, ev, "chart", period, what)
         case cmd.Board():
             if ctx.executor != SWITCH_EXECUTOR:
                 return [
                     Post(
                         ev.room_id,
-                        f"The board is kept by @{SWITCH_EXECUTOR} in "
+                        f"The board is kept by {SWITCH_EXECUTOR} in "
                         f"{ctx.room_name(ctx.policy.room_id('finance'))}.",
                         thread_id=thread,
                     )
@@ -827,6 +1047,149 @@ def _handle_command(ctx: Context, ev: MessageEvent) -> list[Effect]:
         case cmd.Changes(artifact_id=aid, note=note):
             return _changes(ctx, ev, aid, note)
     return []  # pragma: no cover
+
+
+def _sale(ctx: Context, ev: MessageEvent, invoice: str, cents: int, customer: str) -> list[Effect]:
+    """A person lands a late sale in the books: not a gate, an event on the record, done by the
+    ledger executor under the person's id so the next approval meets the changed ledger."""
+    thread = _reply_thread(ev)
+    if ctx.executor != LEDGER_EXECUTOR:
+        return [
+            Post(
+                ev.room_id,
+                f"The books are kept by {LEDGER_EXECUTOR}: type `sale "
+                f"{invoice} {cents / 100:.2f} {customer}` to it in "
+                f"{ctx.room_name(ctx.policy.room_id('planning'))}.",
+                thread_id=thread,
+            )
+        ]
+    name = ctx.name_of(ev.sender, ev.sender_name)
+    if ev.sender in ctx.agent_ids:
+        return _refuse(
+            ev,
+            "refused_sale:agent",
+            f"**{invoice}** not booked — @{name} is an agent; a sale lands from a person.",
+            None,
+        )
+    return [
+        BookSale(invoice, customer, cents, ev.room_id, thread, ev.sender, name),
+        _audit(ev, "sale_requested", invoice=invoice, amount_cents=cents, customer=customer),
+    ]
+
+
+def _report(ctx: Context, ev: MessageEvent, what: str, period: str, subject: str) -> list[Effect]:
+    """Reports, exports and charts are sindarin-switch's: it reads the ledger read-only and can
+    attach files through Switch. The ledger executor points there."""
+    thread = _reply_thread(ev)
+    if ctx.executor != SWITCH_EXECUTOR:
+        words = f"{what} {period}" + (f" {subject}" if subject else "")
+        return [
+            Post(
+                ev.room_id,
+                f"Reports are kept by {SWITCH_EXECUTOR}: type `{words}` to it.",
+                thread_id=thread,
+            )
+        ]
+    name = ctx.name_of(ev.sender, ev.sender_name)
+    return [
+        RunReport(what, period, subject, ev.room_id, thread, ev.sender, name),
+        _audit(ev, f"{what}_requested", period=period, subject=subject),
+    ]
+
+
+def sale_booked_text(e: BookSale, data: dict[str, Any]) -> str:
+    period = data.get("period", "")
+    revenue = int(data.get("revenue_cents", 0))
+    return (
+        f"**{e.invoice}** {e.customer} {money(e.amount_cents)} landed in {period} · "
+        f"{period} revenue is now {money(revenue)}."
+    )
+
+
+def _price(ctx: Context, ev: MessageEvent, product: str, cents: int) -> list[Effect]:
+    """A person edits a list price: not a gate, an event on the record, done by the ledger
+    executor under the person's id so a pending deal meets the changed price book."""
+    thread = _reply_thread(ev)
+    if ctx.executor != LEDGER_EXECUTOR:
+        return [
+            Post(
+                ev.room_id,
+                f"The price book is kept by {LEDGER_EXECUTOR}: type `price "
+                f"{product} {cents / 100:.2f}` to it in "
+                f"{ctx.room_name(ctx.policy.room_id('sales'))}.",
+                thread_id=thread,
+            )
+        ]
+    name = ctx.name_of(ev.sender, ev.sender_name)
+    if ev.sender in ctx.agent_ids:
+        return _refuse(
+            ev,
+            "refused_price:agent",
+            f"**{product}** not repriced — @{name} is an agent; a list price moves by a person.",
+            None,
+        )
+    return [
+        SetPrice(product, cents, ev.room_id, thread, ev.sender, name),
+        _audit(ev, "price_requested", product=product, amount_cents=cents),
+    ]
+
+
+def _read_file(ctx: Context, ev: MessageEvent, url: str, tab: str = "") -> list[Effect]:
+    """Any file a person links: sindarin-switch fetches and describes it, read-only."""
+    thread = _reply_thread(ev)
+    if ctx.executor != SWITCH_EXECUTOR:
+        return [
+            Post(
+                ev.room_id,
+                f"Files are read by {SWITCH_EXECUTOR}: type `read <link>` to it.",
+                thread_id=thread,
+            )
+        ]
+    name = ctx.name_of(ev.sender, ev.sender_name)
+    return [
+        InspectFile(url, tab, ev.room_id, thread, ev.sender, name),
+        _audit(ev, "file_requested", url=url[:200], tab=tab),
+    ]
+
+
+def _load(ctx: Context, ev: MessageEvent, url: str) -> list[Effect]:
+    """The team's file into the books: a write by a person in an approver group, under their
+    id; the ledger keeps its locked months and paid payables whatever the file says."""
+    thread = _reply_thread(ev)
+    if ctx.executor != LEDGER_EXECUTOR:
+        return [
+            Post(
+                ev.room_id,
+                f"The books are loaded by {LEDGER_EXECUTOR}: type `load <link>` to it in "
+                f"{ctx.room_name(ctx.policy.room_id('planning'))}.",
+                thread_id=thread,
+            )
+        ]
+    name = ctx.name_of(ev.sender, ev.sender_name)
+    if ev.sender in ctx.agent_ids:
+        return _refuse(
+            ev,
+            "refused_load:agent",
+            f"**load** refused — @{name} is an agent; the books are loaded by a person.",
+            None,
+        )
+    if not ctx.policy.groups_of(ev.sender):
+        return _refuse(
+            ev,
+            "refused_load:not_approver",
+            f"**load** refused — {name} is in no approver group; the books are loaded by the "
+            "cfo, a controller or the board.",
+            None,
+        )
+    return [
+        LoadBooks(url, ev.room_id, thread, ev.sender, name),
+        _audit(ev, "load_requested", url=url[:200]),
+    ]
+
+
+def price_set_text(e: SetPrice, data: dict[str, Any]) -> str:
+    was = int(data.get("was_cents", 0))
+    return f"**{e.product}** list price is now {money(e.amount_cents)} (was {money(was)})."
 
 
 def _refuse(ev: MessageEvent, code: str, text: str, aid: str | None, **d: Any) -> list[Effect]:
@@ -868,9 +1231,9 @@ def _gate(
                 aid,
             ),
         )
-    # A2 — the group the rule names, by participant id; a budget rule may admit a second group
-    # below its limit, judged on the total the executor read, never on the fence
-    total = a.facts().get("total_cents") if a.kind is Kind.BUDGET else None
+    # A2 — the group the rule names, by participant id; a budget or pay rule may admit a second
+    # group below its limit, judged on the total the executor read, never on the fence
+    total = a.facts().get("total_cents") if a.kind in _LIMITED_KINDS else None
     allowed = rule.approver_groups(int(total) if total is not None else None)
     if not any(ctx.policy.in_group(ev.sender, g) for g in allowed):
         text = f"**{aid}** not applied — {name} is not in the {rule.approvers} group."
@@ -880,8 +1243,11 @@ def _gate(
             and total is not None
             and ctx.policy.in_group(ev.sender, rule.approvers_under_limit)
         ):
+            amount = money(int(total), rule.currency)
+            if a.kind is Kind.DEAL:
+                amount = f"a {amount} discount"
             text = (
-                f"**{aid}** not applied — {money(int(total), rule.currency)} needs the "
+                f"**{aid}** not applied — {amount} needs the "
                 f"{rule.approvers} group; {rule.approvers_under_limit} may approve up to "
                 f"{money(rule.limit_cents, rule.currency)}."
             )
@@ -1110,13 +1476,13 @@ def after_execute(ctx: Context, a: Artifact, result: ActionResult, verified: boo
                 f"verified at **{ctx.now:%H:%M:%S} UTC**.",
                 thread_id=a.thread_id,
             ),
-            *_goals_opened(ctx, a, result.data),
+            *_room_opened(ctx, a, result.data),
             *_status(ctx, a, SUCCESS_OF[a.kind]),
         ]
     error = result.error or ("not visible on read-back" if result.ok else "unknown platform error")
     action = a.proposal().action.replace("_", " ")
     failed = FAILURE_OF[a.kind]
-    if a.kind is Kind.GOALS or a.attempts < ctx.max_attempts:
+    if a.kind in ROOM_KINDS or a.attempts < ctx.max_attempts:
         wait = int(ctx.retry_after.total_seconds() // 60)
         return [
             Transition(a.id, failed, {"error": error, "failed_at": ctx.now}),
@@ -1145,38 +1511,54 @@ def after_execute(ctx: Context, a: Artifact, result: ActionResult, verified: boo
     ]
 
 
-def _goals_opened(ctx: Context, a: Artifact, result: dict[str, Any]) -> list[Effect]:
-    """Post the room's existence in #acme-finance with its members, and the goals into the new
-    room as its first message (the brief every agent in it reads)."""
-    if a.kind is not Kind.GOALS:
+def _room_opened(ctx: Context, a: Artifact, result: dict[str, Any]) -> list[Effect]:
+    """Post the room's existence in #acme-finance with its members, and the brief into the new
+    room as its first message (the one every agent in it reads)."""
+    if a.kind not in ROOM_KINDS:
         return []
     plan = a.facts()
     body: Any = a.proposal().body
     people = ", ".join(ctx.name_of(p) for p in plan.get("humans", []))
     agents = ", ".join(ctx.name_of(p) for p in plan.get("agents", []))  # no mentions: not in here
     room = result.get("room_name") or a.target
-    budget_rule = next(iter(ctx.policy.rules_for(Kind.BUDGET)), None)
-    entries_rule = next(iter(ctx.policy.rules_for(Kind.ENTRIES)), None)
-    budget_by = budget_rule.approvers if budget_rule else "cfo"
-    if budget_rule and budget_rule.approvers_under_limit:
-        budget_by = (
-            f"{budget_rule.approvers_under_limit} (the {budget_rule.approvers} above the limit)"
+    if a.kind is Kind.GOALS:
+        budget_rule = next(iter(ctx.policy.rules_for(Kind.BUDGET)), None)
+        entries_rule = next(iter(ctx.policy.rules_for(Kind.ENTRIES)), None)
+        by = budget_rule.approvers if budget_rule else "cfo"
+        if budget_rule and budget_rule.approvers_under_limit:
+            by = (
+                f"{budget_rule.approvers_under_limit} (the {budget_rule.approvers} above the limit)"
+            )
+        tail = (
+            f"instructions: the goals. The budget is approved in "
+            f"{ctx.room_name(ctx.policy.room_id('planning'))} by {by}; its register entries "
+            f"into the books of {body.period} are approved in the plan room by "
+            f"{entries_rule.approvers if entries_rule else 'controllers'}, both to "
+            f"@{LEDGER_EXECUTOR}."
         )
-    entries_by = entries_rule.approvers if entries_rule else "controllers"
+        kind_word, mention = "plan room", f"@{PLANNER} @{BOOKKEEPER}"
+    else:
+        pay_rule = next(iter(ctx.policy.rules_for(Kind.PAY)), None)
+        lock_rule = next(iter(ctx.policy.rules_for(Kind.LOCK)), None)
+        tail = (
+            f"instructions: the plan. Payment runs are approved in "
+            f"{ctx.room_name(ctx.policy.room_id('payments'))} by "
+            f"{pay_rule.approvers if pay_rule else 'cfo'}; the lock of {body.period} is approved "
+            f"in the period room by {lock_rule.approvers if lock_rule else 'controllers'}, both "
+            f"to @{LEDGER_EXECUTOR}."
+        )
+        kind_word, mention = "period room", f"@{BOOKKEEPER} @{TREASURY}"
     effects: list[Effect] = [
         Post(
             a.room_id,
-            f"**{a.id}** plan room **#{room.lstrip('#')}** is open · people: {people} · "
-            f"agents: {agents} · instructions: the goals. The budget is approved in "
-            f"{ctx.room_name(ctx.policy.room_id('planning'))} by {budget_by}; its register "
-            f"entries into the books of {body.period} are approved in the plan room by "
-            f"{entries_by}, both to @{LEDGER_EXECUTOR}.",
+            f"**{a.id}** {kind_word} **#{room.lstrip('#')}** is open · people: {people} · "
+            f"agents: {agents} · {tail}",
             thread_id=a.thread_id,
         )
     ]
     new_room = result.get("room_id")
     if new_room:
-        effects.append(Post(str(new_room), brief_text(ctx, a, f"@{PLANNER} @{BOOKKEEPER}")))
+        effects.append(Post(str(new_room), brief_text(ctx, a, mention)))
     return effects
 
 
@@ -1191,11 +1573,9 @@ def brief_text(ctx: Context, a: Artifact, mention: str) -> str:
 
 
 def plan_for_room(ctx: Context, room_id: str) -> Artifact | None:
-    """The goals whose plan room this is, from the executor's own record of what it opened."""
-    for a in ctx.view.in_states(
-        State.OPENING, State.OPEN, State.OPEN_FAILED, State.DONE, kind=Kind.GOALS
-    ):
-        if a.result().get("room_id") == room_id:
+    """The goals or plan whose room this is, from the executor's own record of what it opened."""
+    for a in ctx.view.in_states(State.OPENING, State.OPEN, State.OPEN_FAILED, State.DONE):
+        if a.kind in ROOM_KINDS and a.result().get("room_id") == room_id:
             return a
     return None
 
@@ -1206,8 +1586,7 @@ def _brief(ctx: Context, ev: MessageEvent) -> list[Effect]:
         return [
             Post(
                 ev.room_id,
-                f"The goals are kept by @{SWITCH_EXECUTOR}: ask it with "
-                f"`@{SWITCH_EXECUTOR} brief`.",
+                f"The goals are kept by {SWITCH_EXECUTOR}: ask it with `brief`.",
                 thread_id=thread,
             )
         ]
@@ -1216,7 +1595,7 @@ def _brief(ctx: Context, ev: MessageEvent) -> list[Effect]:
         return [
             Post(
                 ev.room_id,
-                "No goals opened this room; `brief` works in a plan room.",
+                "Nothing opened this room; `brief` works in a plan room or a period room.",
                 thread_id=thread,
             )
         ]
@@ -1241,73 +1620,142 @@ def after_verify(ctx: Context, a: Artifact, v: VerifyResult) -> list[Effect]:
 # ---------------------------------------------------------------------------------------------
 
 
-def _goals_stages(ctx: Context) -> list[Effect]:
-    """open → done when the period's register entries are posted. Read from the other
-    executor's state, never from its messages. The stage line wakes the analyst."""
+def _switch_stages(ctx: Context) -> list[Effect]:
+    """open → done when the chain's last step is applied: the register entries for the goals,
+    the lock for the month's plan. Read from the other executor's state, never from its
+    messages. The stage line wakes the analyst."""
     effects: list[Effect] = []
-    planned: dict[str, Artifact] = {}
+    finished: dict[str, Artifact] = {}
     for a in ctx.peer_artifacts:
-        if a.kind is Kind.ENTRIES and a.state is State.PLANNED:
-            planned.setdefault(a.proposal().body.goals, a)  # type: ignore[union-attr]
-    for goals in ctx.view.in_states(State.OPEN, kind=Kind.GOALS):
-        entries = planned.get(goals.id)
-        if entries is None:
+        if (a.kind is Kind.ENTRIES and a.state is State.PLANNED) or (
+            a.kind is Kind.LOCK and a.state is State.LOCKED
+        ):
+            finished.setdefault(_head_id(a.proposal().body), a)
+    for head in ctx.view.in_states(State.OPEN):
+        if head.kind not in ROOM_KINDS:
             continue
+        last = finished.get(head.id)
+        if last is None:
+            continue
+        outcome = "planned" if head.kind is Kind.GOALS else "locked"
         effects += [
-            Transition(goals.id, State.DONE),
-            Audit("goals_done", goals.id, details={"entries": entries.id}),
+            Transition(head.id, State.DONE),
+            Audit(f"{head.kind.value}_done", head.id, details={"last": last.id}),
             Post(
-                goals.room_id,
-                f"**{goals.id}** done · {entries.id} applied · period {goals.period} is planned. "
+                head.room_id,
+                f"**{head.id}** done · {last.id} applied · period {head.period} is {outcome}. "
                 f"@{ANALYST} tell the business.",
-                goals.thread_id,
+                head.thread_id,
             ),
+        ]
+    finance = ctx.policy.room_id("finance")
+    for deal in ctx.peer_artifacts:
+        # a won deal is told once to the finance room: the books moved by a sale
+        if deal.kind is not Kind.DEAL or deal.state is not State.WON or not finance:
+            continue
+        if ctx.view.get_value(f"stage:won:{deal.id}") is not None:
+            continue
+        dbody: Any = deal.proposal().body
+        revenue = deal.result().get("revenue_cents")
+        now = (
+            f" · {dbody.period} revenue is now {money(int(revenue), dbody.currency)}"
+            if revenue is not None
+            else ""
+        )
+        effects += [
+            SetValue(f"stage:won:{deal.id}", ctx.now.isoformat()),
+            Post(
+                finance,
+                f"**{deal.id}** won · {dbody.deal_id} {dbody.account} · {dbody.product} at "
+                f"{money(dbody.price_cents, dbody.currency)} landed in {dbody.period}{now}.",
+            ),
+            Audit("stage_line", deal.id, details={"stage": "won"}),
         ]
     return effects
 
 
+_goals_stages = _switch_stages
+
+
 def _ledger_stages(ctx: Context) -> list[Effect]:
     """Hand the work on (design v5 §5): once the goals are approved, call the planner in
-    #planning; once the budget is recorded, call the bookkeeper in the plan room. Each line is
-    posted once and recorded in the store; it is the only way a machine wakes an agent."""
+    #planning, and once the budget is recorded, the bookkeeper in the plan room; once a plan
+    is approved, call the treasury agent in #payments, and once its run is paid (or it had no
+    payables), the bookkeeper in the period room. Each line is posted once and recorded in the
+    store; it is the only way a machine wakes an agent."""
     effects: list[Effect] = []
     planning = ctx.policy.room_id("planning")
+    payments = ctx.policy.room_id("payments")
     recorded = [a for a in ctx.view.in_states(State.RECORDED, kind=Kind.BUDGET)]
-    for goals in ctx.peer_artifacts:
-        if goals.kind is not Kind.GOALS or goals.state not in (State.OPEN, State.DONE):
+    paid_runs = [a for a in ctx.view.in_states(State.PAID, kind=Kind.PAY)]
+    for head in ctx.peer_artifacts:
+        if head.kind not in ROOM_KINDS or head.state not in (State.OPEN, State.DONE):
             continue
-        body: Any = goals.proposal().body
-        room = str(goals.result().get("room_id") or "")
-        if planning and ctx.view.get_value(f"stage:budget:{goals.id}") is None:
+        body: Any = head.proposal().body
+        room = str(head.result().get("room_id") or "")
+        if head.kind is Kind.GOALS:
+            if planning and ctx.view.get_value(f"stage:budget:{head.id}") is None:
+                effects += [
+                    SetValue(f"stage:budget:{head.id}", ctx.now.isoformat()),
+                    Post(
+                        planning,
+                        f"**{head.id}** approved · revenue target "
+                        f"{money(body.revenue_target_cents, body.currency)} · cost cap "
+                        f"{money(body.cost_cap_cents, body.currency)} for {body.period}. "
+                        f"@{PLANNER} propose the budget.",
+                    ),
+                    Audit("stage_line", head.id, details={"stage": "budget"}),
+                ]
+            mine = [a for a in recorded if a.proposal().body.goals == head.id]  # type: ignore[union-attr]
+            if (
+                mine
+                and room
+                and head.state is State.OPEN
+                and ctx.view.get_value(f"stage:entries:{head.id}") is None
+            ):
+                b: Any = mine[0].proposal().body
+                n = len(b.lines)
+                effects += [
+                    SetValue(f"stage:entries:{head.id}", ctx.now.isoformat()),
+                    Post(
+                        room,
+                        f"**{mine[0].id}** recorded · {n} line{'s' if n != 1 else ''}, "
+                        f"{money(b.total_cents, b.currency)} under the cap · period "
+                        f"{body.period} is ready for its entries. @{BOOKKEEPER} propose the "
+                        "budget register entries.",
+                    ),
+                    Audit("stage_line", head.id, details={"stage": "entries"}),
+                ]
+            continue
+        # the month-end chain
+        if body.payables and payments and ctx.view.get_value(f"stage:pay:{head.id}") is None:
+            n = len(body.payables)
             effects += [
-                SetValue(f"stage:budget:{goals.id}", ctx.now.isoformat()),
+                SetValue(f"stage:pay:{head.id}", ctx.now.isoformat()),
                 Post(
-                    planning,
-                    f"**{goals.id}** approved · revenue target "
-                    f"{money(body.revenue_target_cents, body.currency)} · cost cap "
-                    f"{money(body.cost_cap_cents, body.currency)} for {body.period}. "
-                    f"@{PLANNER} propose the budget.",
+                    payments,
+                    f"**{head.id}** approved · {n} payable{'s' if n != 1 else ''}, "
+                    f"{money(body.total_payables_cents, body.currency)} for {body.period}. "
+                    f"@{TREASURY} propose the payment run.",
                 ),
-                Audit("stage_line", goals.id, details={"stage": "budget"}),
+                Audit("stage_line", head.id, details={"stage": "pay"}),
             ]
-        mine = [a for a in recorded if a.proposal().body.goals == goals.id]  # type: ignore[union-attr]
+        paid = [a for a in paid_runs if a.proposal().body.plan == head.id]  # type: ignore[union-attr]
+        ready = not body.payables or bool(paid)
         if (
-            mine
+            ready
             and room
-            and goals.state is State.OPEN
-            and ctx.view.get_value(f"stage:entries:{goals.id}") is None
+            and head.state is State.OPEN
+            and ctx.view.get_value(f"stage:lock:{head.id}") is None
         ):
-            b: Any = mine[0].proposal().body
-            n = len(b.lines)
+            lead = f"**{paid[0].id}** paid · " if paid else ""
             effects += [
-                SetValue(f"stage:entries:{goals.id}", ctx.now.isoformat()),
+                SetValue(f"stage:lock:{head.id}", ctx.now.isoformat()),
                 Post(
                     room,
-                    f"**{mine[0].id}** recorded · {n} line{'s' if n != 1 else ''}, "
-                    f"{money(b.total_cents, b.currency)} under the cap · period {body.period} "
-                    f"is ready for its entries. @{BOOKKEEPER} propose the budget register entries.",
+                    f"{lead}period {body.period} is ready to lock. @{BOOKKEEPER} propose the lock.",
                 ),
-                Audit("stage_line", goals.id, details={"stage": "entries"}),
+                Audit("stage_line", head.id, details={"stage": "lock"}),
             ]
     return effects
 
@@ -1355,6 +1803,8 @@ def _waiting_on(ctx: Context, a: Artifact) -> str:
         return "executor"
     if a.kind is Kind.GOALS and a.state is State.OPEN:
         return f"{PLANNER} and {BOOKKEEPER}"
+    if a.kind is Kind.CLOSE and a.state is State.OPEN:
+        return f"{TREASURY} and {BOOKKEEPER}"
     return "-"
 
 

@@ -20,8 +20,12 @@ from sindarin.schema import (
     Kind,
     Proposal,
     budget_target,
+    close_target,
+    deal_target,
     entries_target,
     goals_target,
+    lock_target,
+    pay_target,
 )
 
 
@@ -165,6 +169,166 @@ def build_entries(
                 "budget": budget,
                 "lines": list(lines),
                 "memo": memo,
+            },
+            "ask": ask,
+            "rule": rule_name,
+            "justification": justification[:MAX_JUSTIFICATION],
+        },
+    )
+
+
+def build_close(
+    policy: Policy,
+    *,
+    period: str,
+    title: str,
+    summary: str,
+    report: list[str],
+    entries: list[dict[str, Any]],
+    payables: list[str],
+    total_payables_cents: int,
+    currency: str = "USD",
+    ask: str = "",
+    justification: str,
+    rule: str | None = None,
+) -> Proposal:
+    rule_name = _rule_for(policy, Kind.CLOSE, rule)
+    return _finish(
+        policy,
+        {
+            "schema": PROPOSAL_SCHEMA,
+            "kind": "close",
+            "platform": "switch",
+            "action": "open_period_room",
+            "target": close_target(period),
+            "body": {
+                "period": period,
+                "title": title,
+                "summary": summary,
+                "report": list(report),
+                "entries": list(entries),
+                "payables": list(payables),
+                "total_payables_cents": int(total_payables_cents),
+                "currency": currency,
+            },
+            "ask": ask,
+            "rule": rule_name,
+            "justification": justification[:MAX_JUSTIFICATION],
+        },
+    )
+
+
+def build_pay(
+    policy: Policy,
+    *,
+    period: str,
+    plan: str,
+    run: list[dict[str, Any]],
+    currency: str = "USD",
+    digest: str = "",
+    ask: str = "",
+    justification: str,
+    rule: str | None = None,
+) -> Proposal:
+    rule_name = _rule_for(policy, Kind.PAY, rule)
+    total = sum(int(x.get("amount_cents", 0)) for x in run)
+    return _finish(
+        policy,
+        {
+            "schema": PROPOSAL_SCHEMA,
+            "kind": "pay",
+            "platform": "ledger",
+            "action": "pay_run",
+            "target": pay_target(period),
+            "snapshot_hint": digest or "",
+            "body": {
+                "period": period,
+                "plan": plan,
+                "run": list(run),
+                "total_cents": total,
+                "currency": currency,
+            },
+            "ask": ask,
+            "rule": rule_name,
+            "justification": justification[:MAX_JUSTIFICATION],
+        },
+    )
+
+
+def build_lock(
+    policy: Policy,
+    *,
+    period: str,
+    plan: str,
+    pay_run: str = "",
+    entries: list[dict[str, Any]],
+    memo: str,
+    digest: str = "",
+    ask: str = "",
+    justification: str,
+    rule: str | None = None,
+) -> Proposal:
+    rule_name = _rule_for(policy, Kind.LOCK, rule)
+    return _finish(
+        policy,
+        {
+            "schema": PROPOSAL_SCHEMA,
+            "kind": "lock",
+            "platform": "ledger",
+            "action": "lock_period",
+            "target": lock_target(period),
+            "snapshot_hint": digest or "",
+            "body": {
+                "period": period,
+                "plan": plan,
+                "pay_run": pay_run,
+                "entries": list(entries),
+                "memo": memo,
+            },
+            "ask": ask,
+            "rule": rule_name,
+            "justification": justification[:MAX_JUSTIFICATION],
+        },
+    )
+
+
+def build_deal(
+    policy: Policy,
+    *,
+    period: str,
+    deal_id: str,
+    account: str,
+    product: str,
+    list_cents: int,
+    price_cents: int,
+    terms: str = "standard",
+    currency: str = "USD",
+    digest: str = "",
+    ask: str = "",
+    justification: str,
+    rule: str | None = None,
+) -> Proposal:
+    rule_name = _rule_for(policy, Kind.DEAL, rule)
+    bps = round((int(list_cents) - int(price_cents)) * 10000 / int(list_cents)) if list_cents else 0
+    return _finish(
+        policy,
+        {
+            "schema": PROPOSAL_SCHEMA,
+            "kind": "deal",
+            "platform": "ledger",
+            "action": "record_deal",
+            "target": deal_target(deal_id),
+            "snapshot_hint": digest or "",
+            "body": {
+                "period": period,
+                "deal_id": deal_id,
+                "account": account,
+                "product": product,
+                "list_cents": int(list_cents),
+                "price_cents": int(price_cents),
+                "discount_bps": int(bps),
+                "terms": terms,
+                "currency": currency,
             },
             "ask": ask,
             "rule": rule_name,

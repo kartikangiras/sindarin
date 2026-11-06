@@ -33,7 +33,7 @@ CREATE TABLE IF NOT EXISTS lines(
   debit_cents INTEGER NOT NULL DEFAULT 0, credit_cents INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS periods(
   period TEXT PRIMARY KEY, status TEXT NOT NULL DEFAULT 'open', planned_at TEXT,
-  budget_sha TEXT);
+  budget_sha TEXT, locked_at TEXT, trial_balance_sha TEXT);
 CREATE TABLE IF NOT EXISTS targets(
   period TEXT PRIMARY KEY, revenue_cents INTEGER NOT NULL, margin_bps INTEGER NOT NULL,
   cost_cap_cents INTEGER NOT NULL, source TEXT NOT NULL, recorded_at TEXT NOT NULL);
@@ -41,6 +41,11 @@ CREATE TABLE IF NOT EXISTS budgets(
   period TEXT NOT NULL, department TEXT NOT NULL, account TEXT NOT NULL,
   amount_cents INTEGER NOT NULL, source TEXT NOT NULL, recorded_at TEXT NOT NULL,
   PRIMARY KEY (period, department));
+CREATE TABLE IF NOT EXISTS price_book(product TEXT PRIMARY KEY, list_cents INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS deals(
+  id TEXT PRIMARY KEY, account TEXT NOT NULL, product TEXT NOT NULL, list_cents INTEGER NOT NULL,
+  price_cents INTEGER NOT NULL, discount_bps INTEGER NOT NULL, terms TEXT NOT NULL,
+  period TEXT NOT NULL, stage TEXT NOT NULL, source TEXT NOT NULL, won_at TEXT);
 CREATE TABLE IF NOT EXISTS planned(
   period TEXT NOT NULL, department TEXT NOT NULL, account TEXT NOT NULL,
   amount_cents INTEGER NOT NULL, source TEXT NOT NULL, posted_at TEXT NOT NULL,
@@ -48,6 +53,8 @@ CREATE TABLE IF NOT EXISTS planned(
 """
 CASH, RECEIVABLE, REVENUE, EXPENSE = "1000", "1100", "4000", "6000"
 _TABLES = (
+    "deals",
+    "price_book",
     "planned",
     "budgets",
     "targets",
@@ -70,6 +77,29 @@ def _now() -> str:
 
 def period_of(date_text: str) -> str:
     return date_text[:7]
+
+
+def _date(value: Any) -> str:
+    """A date cell as `YYYY-MM-DD`: an ISO string, or a spreadsheet date object."""
+    if hasattr(value, "strftime"):
+        return value.strftime("%Y-%m-%d")
+    return str(value).strip()[:10]
+
+
+def _cents(row: Mapping[str, Any], name: str) -> int:
+    """`<name>_cents` when the sheet keeps cents, else `<name>` as a decimal amount."""
+    if row.get(f"{name}_cents") not in (None, ""):
+        return int(float(str(row[f"{name}_cents"]).replace(",", "")))
+    value = row.get(name, row.get(f"{name}_usd", 0))
+    return round(float(str(value or 0).replace(",", "").replace("$", "")) * 100)
+
+
+def _bps(row: Mapping[str, Any]) -> int:
+    """`margin_bps`, or `margin` as a percentage (`75` or `75%`)."""
+    if row.get("margin_bps") not in (None, ""):
+        return int(float(str(row["margin_bps"])))
+    value = str(row.get("margin", "0")).replace("%", "").strip() or "0"
+    return round(float(value) * 100)
 
 
 class Ledger:
@@ -97,49 +127,124 @@ class Ledger:
         """Load a period's data: accounts.csv, sales.csv, payables.csv and, when present, the
         targets the period was given (targets.csv). Idempotent on a fresh file; returns counts."""
         folder = Path(folder)
+        tabs: dict[str, list[dict[str, Any]]] = {}
+        for name in ("accounts", "sales", "payables", "targets", "price_book"):
+            path = folder / f"{name}.csv"
+            if path.exists():
+                with open(path, newline="", encoding="utf-8") as f:
+                    tabs[name] = [dict(r) for r in csv.DictReader(f)]
+        return self.import_tabs(tabs)
+
+    def import_tabs(self, tabs: Mapping[str, list[Mapping[str, Any]]]) -> dict[str, int]:
+        """Load the tabs of a workbook (a folder of CSVs, a Google Sheet, an Excel file): accounts,
+        sales, payables and targets, each a list of rows keyed by the header. Money may come as
+        cents (`amount_cents`) or as a decimal amount (`amount`)."""
         self._check_write()
-        counts = {"accounts": 0, "sales": 0, "payables": 0, "targets": 0}
-        with open(folder / "accounts.csv", newline="", encoding="utf-8") as f:
-            for row in csv.DictReader(f):
-                self._db.execute(
-                    "INSERT OR REPLACE INTO accounts(code, name, type) VALUES (?,?,?)",
-                    (row["code"], row["name"], row["type"]),
-                )
-                counts["accounts"] += 1
-        with open(folder / "sales.csv", newline="", encoding="utf-8") as f:
-            for row in csv.DictReader(f):
-                self._sale(row["invoice"], row["date"], row["customer"], int(row["amount_cents"]))
-                counts["sales"] += 1
-        with open(folder / "payables.csv", newline="", encoding="utf-8") as f:
-            for row in csv.DictReader(f):
-                period = period_of(row["due"])
-                self._db.execute(
-                    "INSERT OR REPLACE INTO payables(invoice, vendor, amount_cents, due, period) "
-                    "VALUES (?,?,?,?,?)",
-                    (row["invoice"], row["vendor"], int(row["amount_cents"]), row["due"], period),
-                )
-                self._ensure_period(period)
-                counts["payables"] += 1
-        targets = folder / "targets.csv"
-        if targets.exists():
-            with open(targets, newline="", encoding="utf-8") as f:
-                for row in csv.DictReader(f):
-                    self._db.execute(
-                        "INSERT OR REPLACE INTO targets(period, revenue_cents, margin_bps, "
-                        "cost_cap_cents, source, recorded_at) VALUES (?,?,?,?,?,?)",
-                        (
-                            row["period"],
-                            int(row["revenue_cents"]),
-                            int(row["margin_bps"]),
-                            int(row["cost_cap_cents"]),
-                            "import",
-                            _now(),
-                        ),
-                    )
-                    self._ensure_period(row["period"])
-                    counts["targets"] += 1
+        counts = {"accounts": 0, "sales": 0, "payables": 0, "targets": 0, "price_book": 0}
+        for row in tabs.get("price_book", []):
+            self._db.execute(
+                "INSERT OR REPLACE INTO price_book(product, list_cents) VALUES (?,?)",
+                (str(row["product"]).strip(), _cents(row, "list")),
+            )
+            counts["price_book"] += 1
+        for row in tabs.get("accounts", []):
+            self._db.execute(
+                "INSERT OR REPLACE INTO accounts(code, name, type) VALUES (?,?,?)",
+                (str(row["code"]).strip(), str(row["name"]).strip(), str(row["type"]).strip()),
+            )
+            counts["accounts"] += 1
+        for row in tabs.get("sales", []):
+            self._sale(
+                str(row["invoice"]).strip(),
+                _date(row["date"]),
+                str(row["customer"]).strip(),
+                _cents(row, "amount"),
+            )
+            counts["sales"] += 1
+        for row in tabs.get("payables", []):
+            due = _date(row["due"])
+            period = period_of(due)
+            self._db.execute(
+                "INSERT OR REPLACE INTO payables(invoice, vendor, amount_cents, due, period) "
+                "VALUES (?,?,?,?,?)",
+                (
+                    str(row["invoice"]).strip(),
+                    str(row["vendor"]).strip(),
+                    _cents(row, "amount"),
+                    due,
+                    period,
+                ),
+            )
+            self._ensure_period(period)
+            counts["payables"] += 1
+        for row in tabs.get("targets", []):
+            period = str(row["period"]).strip()[:7]
+            self._db.execute(
+                "INSERT OR REPLACE INTO targets(period, revenue_cents, margin_bps, "
+                "cost_cap_cents, source, recorded_at) VALUES (?,?,?,?,?,?)",
+                (
+                    period,
+                    _cents(row, "revenue"),
+                    _bps(row),
+                    _cents(row, "cost_cap"),
+                    "import",
+                    _now(),
+                ),
+            )
+            self._ensure_period(period)
+            counts["targets"] += 1
         self._db.commit()
         return counts
+
+    def load_tabs(self, tabs: Mapping[str, list[Mapping[str, Any]]]) -> dict[str, Any]:
+        """A person loads the team's file into the books from chat. The file's tabs replace what
+        they describe: sales and open payables of the open months are replaced, accounts,
+        targets and prices upserted. Paid payables and locked months are kept and the file's
+        rows for them skipped and reported."""
+        self._check_write()
+        locked = {p for p in self.periods() if self.period_status(p) == "locked"}
+        skipped: list[dict[str, str]] = []  # {"invoice", "reason"}
+        sales = []
+        for r in tabs.get("sales", []):
+            p = period_of(_date(r["date"]))
+            if p in locked:
+                skipped.append({"invoice": str(r["invoice"]), "reason": f"{p} is locked"})
+            else:
+                sales.append(r)
+        paid = {r["invoice"] for r in self.payables() if r["status"] == "paid"}
+        payables = []
+        for r in tabs.get("payables", []):
+            inv = str(r["invoice"]).strip()
+            due_period = period_of(_date(r["due"]))
+            if inv in paid:
+                skipped.append({"invoice": inv, "reason": "paid"})
+            elif due_period in locked:
+                skipped.append({"invoice": inv, "reason": f"{due_period} is locked"})
+            else:
+                payables.append(r)
+        try:
+            if "sales" in tabs:
+                for p in [p for p in self.periods() if p not in locked]:
+                    self._db.execute(
+                        "DELETE FROM lines WHERE journal_id IN "
+                        "(SELECT id FROM journal WHERE source='sales' AND period=?)",
+                        (p,),
+                    )
+                    self._db.execute("DELETE FROM journal WHERE source='sales' AND period=?", (p,))
+                    self._db.execute("DELETE FROM sales WHERE period=?", (p,))
+            if "payables" in tabs:
+                self._db.execute("DELETE FROM payables WHERE status='open'")
+            rest = {k: v for k, v in tabs.items() if k not in ("sales", "payables")}
+            counts = self.import_tabs({**rest, "sales": sales, "payables": payables})
+        except Exception:
+            self._db.rollback()
+            raise
+        touched = sorted(
+            {period_of(_date(r["date"])) for r in sales}
+            | {period_of(_date(r["due"])) for r in payables}
+            | {str(r["period"]).strip()[:7] for r in tabs.get("targets", [])}
+        )
+        return {"counts": counts, "skipped": skipped, "periods": touched}
 
     def reset(self, folder: str | Path) -> dict[str, int]:
         self._check_write()
@@ -219,6 +324,32 @@ class Ledger:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def price_book(self) -> dict[str, int]:
+        rows = self._db.execute("SELECT product, list_cents FROM price_book ORDER BY product")
+        return {r["product"]: int(r["list_cents"]) for r in rows.fetchall()}
+
+    def deal(self, deal_id: str) -> dict[str, Any] | None:
+        row = self._db.execute("SELECT * FROM deals WHERE id=?", (deal_id,)).fetchone()
+        return dict(row) if row else None
+
+    def deals(self, period: str | None = None) -> list[dict[str, Any]]:
+        if period is None:
+            rows = self._db.execute("SELECT * FROM deals ORDER BY id").fetchall()
+        else:
+            rows = self._db.execute(
+                "SELECT * FROM deals WHERE period=? ORDER BY id", (period,)
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def next_deal_id(self, period: str) -> str:
+        """`D-<year>-<n>`, the next number for the year of the period."""
+        year = period[:4]
+        rows = self._db.execute(
+            "SELECT id FROM deals WHERE id LIKE ? ORDER BY id", (f"D-{year}-%",)
+        ).fetchall()
+        used = [int(r["id"].rsplit("-", 1)[1]) for r in rows]
+        return f"D-{year}-{(max(used) + 1) if used else 1:02d}"
+
     def trial_balance(self, period: str) -> dict[str, int]:
         """Balance per account (debits minus credits) over everything posted up to `period`."""
         rows = self._db.execute(
@@ -232,6 +363,13 @@ class Ledger:
     def journal_by_source(self, source: str) -> list[dict[str, Any]]:
         rows = self._db.execute(
             "SELECT id, period, date, memo FROM journal WHERE source=? ORDER BY id", (source,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def journal(self, period: str) -> list[dict[str, Any]]:
+        rows = self._db.execute(
+            "SELECT id, period, date, memo, source FROM journal WHERE period=? ORDER BY id",
+            (period,),
         ).fetchall()
         return [dict(r) for r in rows]
 
@@ -297,6 +435,29 @@ class Ledger:
                 }
             )
         )
+
+    @staticmethod
+    def payables_digest(rows: list[Mapping[str, Any]]) -> str:
+        return sha256_hex(
+            canonical_json(
+                [
+                    {
+                        "invoice": r["invoice"],
+                        "vendor": r["vendor"],
+                        "amount_cents": int(r["amount_cents"]),
+                        "status": r["status"],
+                    }
+                    for r in sorted(rows, key=lambda r: r["invoice"])
+                ]
+            )
+        )
+
+    @staticmethod
+    def balance_digest(tb: Mapping[str, int]) -> str:
+        return sha256_hex(canonical_json(dict(sorted(tb.items()))))
+
+    def open_payables(self, period: str) -> list[dict[str, Any]]:
+        return [p for p in self.payables(period=period) if p["status"] == "open"]
 
     @staticmethod
     def budget_digest(rows: list[Mapping[str, Any]]) -> str:
@@ -420,13 +581,157 @@ class Ledger:
             raise
         return self.planned(period)
 
+    def pay(self, run_id: str, invoices: Iterable[str], date: str | None = None) -> int:
+        """Mark the payables paid under `run_id` and book the payments. Idempotent on the run:
+        rows already paid by this run are left alone; rows paid by another run or missing are
+        a refusal."""
+        self._check_write()
+        ids = sorted(set(invoices))
+        rows = {r["invoice"]: r for r in self.payables(ids)}
+        missing = [i for i in ids if i not in rows]
+        if missing:
+            raise LedgerError(f"unknown payables: {', '.join(missing)}")
+        other = [i for i in ids if rows[i]["status"] == "paid" and rows[i]["run_id"] != run_id]
+        if other:
+            raise LedgerError(f"already paid by another run: {', '.join(other)}")
+        when = date or _now()[:10]
+        paid = 0
+        for i in ids:
+            r = rows[i]
+            if r["status"] == "paid":
+                continue
+            if self.period_status(r["period"]) == "locked":
+                raise LedgerError(f"period {r['period']} is locked")
+            self._db.execute(
+                "UPDATE payables SET status='paid', run_id=?, paid_at=? WHERE invoice=?",
+                (run_id, _now(), i),
+            )
+            jid = self._journal(r["period"], when, f"paid {i} {r['vendor']}", run_id)
+            self._line(jid, EXPENSE, int(r["amount_cents"]), 0)
+            self._line(jid, CASH, 0, int(r["amount_cents"]))
+            paid += 1
+        self._db.commit()
+        return paid
+
+    def post_entries(
+        self,
+        period: str,
+        entries: Iterable[Mapping[str, Any]],
+        source: str,
+        date: str | None = None,
+    ) -> list[int]:
+        """Post balanced entries into an open period in one transaction. Idempotent on `source`:
+        when entries from this source exist, nothing is posted again."""
+        self._check_write()
+        if self.period_status(period) == "locked":
+            raise LedgerError(f"period {period} is locked")
+        existing = self.journal_by_source(source)
+        if existing:
+            return [e["id"] for e in existing]
+        known = self.accounts()
+        ids: list[int] = []
+        when = date or _now()[:10]
+        try:
+            for e in entries:
+                lines = list(e["lines"])
+                debits = sum(int(x.get("debit_cents", 0)) for x in lines)
+                credits = sum(int(x.get("credit_cents", 0)) for x in lines)
+                if debits != credits:
+                    raise LedgerError(f"entry {e.get('memo', '')!r} is not balanced")
+                for x in lines:
+                    if str(x["account"]) not in known:
+                        raise LedgerError(f"unknown account {x['account']}")
+                self._ensure_period(period)
+                jid = self._journal(period, when, str(e["memo"]), source)
+                for x in lines:
+                    self._line(
+                        jid,
+                        str(x["account"]),
+                        int(x.get("debit_cents", 0)),
+                        int(x.get("credit_cents", 0)),
+                    )
+                ids.append(jid)
+            self._db.commit()
+        except Exception:
+            self._db.rollback()
+            raise
+        return ids
+
+    def lock_period(self, period: str) -> str:
+        """Lock the period and record the trial balance it closed with. Idempotent."""
+        self._check_write()
+        self._ensure_period(period)
+        digest = self.balance_digest(self.trial_balance(period))
+        self._db.execute(
+            "UPDATE periods SET status='locked', locked_at=COALESCE(locked_at, ?), "
+            "trial_balance_sha=? WHERE period=?",
+            (_now(), digest, period),
+        )
+        self._db.commit()
+        return digest
+
+    def record_deal(self, source: str, deal: Mapping[str, Any]) -> dict[str, Any]:
+        """Record a won deal and post its sale into the period's books. Idempotent on the deal
+        id; a deal already won by another artifact is a refusal; a locked period refuses."""
+        self._check_write()
+        existing = self.deal(str(deal["deal_id"]))
+        if existing is not None:
+            if existing["source"] == source:
+                return existing
+            raise LedgerError(
+                f"{deal['deal_id']} is already {existing['stage']} ({existing['source']})"
+            )
+        period = str(deal["period"])
+        if self.period_status(period) == "locked":
+            raise LedgerError(f"period {period} is locked")
+        try:
+            self._db.execute(
+                "INSERT INTO deals(id, account, product, list_cents, price_cents, discount_bps, "
+                "terms, period, stage, source, won_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    str(deal["deal_id"]),
+                    str(deal["account"]),
+                    str(deal["product"]),
+                    int(deal["list_cents"]),
+                    int(deal["price_cents"]),
+                    int(deal["discount_bps"]),
+                    str(deal.get("terms", "standard")),
+                    period,
+                    "won",
+                    source,
+                    _now(),
+                ),
+            )
+            self._sale(
+                str(deal["deal_id"]),
+                f"{period}-{min(int(_now()[8:10] or 1), 28):02d}",
+                str(deal["account"]),
+                int(deal["price_cents"]),
+            )
+            self._db.commit()
+        except Exception:
+            self._db.rollback()
+            raise
+        return self.deal(str(deal["deal_id"])) or {}
+
+    def set_list_price(self, product: str, list_cents: int) -> dict[str, Any]:
+        """Edit a list price (the books move under a pending deal)."""
+        self._check_write()
+        if product not in self.price_book():
+            raise LedgerError(f"unknown product {product}")
+        self._db.execute(
+            "UPDATE price_book SET list_cents=? WHERE product=?", (int(list_cents), product)
+        )
+        self._db.commit()
+        return {"product": product, "list_cents": int(list_cents)}
+
     def add_sale(self, invoice: str, date: str, customer: str, amount_cents: int) -> dict:
         """A late sale lands in the books (the demo's 'changed after the proposal' moment)."""
         self._check_write()
         if amount_cents <= 0:
             raise LedgerError("the amount must be positive")
-        if self.period_status(period_of(date)) == "planned":
-            raise LedgerError(f"period {period_of(date)} is planned; its books are closed to sales")
+        if self.period_status(period_of(date)) == "locked":
+            raise LedgerError(f"period {period_of(date)} is locked; its books take no sale")
         self._sale(invoice, date, customer, int(amount_cents))
         self._db.commit()
         return {

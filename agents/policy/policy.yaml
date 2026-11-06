@@ -12,6 +12,8 @@ proposers:
   analyst: "@switch-agent-cc9230bb:localhost"
   planner: "@switch-agent-339ae16b:localhost"
   bookkeeper: "@switch-agent-9648f6fe:localhost"
+  treasury: "@switch-agent-f8ca89d0:localhost"
+  sales: "@switch-agent-b0b973e0:localhost"
 
 executors:
   sindarin-switch: "@switch-agent-99c39840:localhost"
@@ -20,6 +22,8 @@ executors:
 rooms:
   finance: "02e11ed7-ac78-4028-b561-d00c7a23573a"
   planning: "cf304b00-a572-49af-bfa7-7aea2bafbb5c"
+  payments: "f81d0c64-3455-4632-abc9-a69a5adcd8c0"
+  sales: "9b8a8295-c309-41c8-8bec-4ad9ff4d3408"
 
 rules:
   - name: goals
@@ -44,5 +48,38 @@ rules:
     proposer: bookkeeper
     approvers: controllers
     room: period             # the plan room the goals opened
+    currency: USD
+    pending_ttl: 24h
+  - name: close
+    kind: close
+    proposer: bookkeeper
+    approvers: controllers
+    also_invite: cfo          # sits in the period room too
+    room: finance
+    currency: USD
+    pending_ttl: 24h
+  - name: pay
+    kind: pay
+    proposer: treasury
+    approvers: cfo
+    approvers_under_limit: controllers
+    limit_cents: 1000000      # 10,000.00 USD: below it a controller may approve
+    room: payments
+    currency: USD
+    pending_ttl: 24h
+  - name: lock
+    kind: lock
+    proposer: bookkeeper
+    approvers: controllers
+    room: period             # the period room the plan opened
+    currency: USD
+    pending_ttl: 24h
+  - name: deal
+    kind: deal
+    proposer: sales
+    approvers: cfo
+    approvers_under_limit: controllers
+    limit_cents: 100000       # a 1,000.00 USD discount: below it a controller may approve
+    room: sales
     currency: USD
     pending_ttl: 24h

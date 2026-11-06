@@ -53,6 +53,38 @@ TRANSITIONS: dict[Kind, dict[State, frozenset[State]]] = {
         State.PLANNED: frozenset(),
         State.FAILED: frozenset(),
     },
+    Kind.CLOSE: {
+        **_WAITING,
+        State.APPROVED: frozenset({State.OPENING}),
+        State.OPENING: frozenset({State.OPEN, State.OPEN_FAILED}),
+        State.OPEN_FAILED: frozenset({State.OPENING}),
+        State.OPEN: frozenset({State.DONE}),
+        State.DONE: frozenset(),
+    },
+    Kind.PAY: {
+        **_WAITING,
+        State.APPROVED: frozenset({State.EXECUTING}),
+        State.EXECUTING: frozenset({State.PAID, State.PAY_FAILED}),
+        State.PAY_FAILED: frozenset({State.EXECUTING, State.FAILED}),
+        State.PAID: frozenset(),
+        State.FAILED: frozenset(),
+    },
+    Kind.LOCK: {
+        **_WAITING,
+        State.APPROVED: frozenset({State.EXECUTING}),
+        State.EXECUTING: frozenset({State.LOCKED, State.LOCK_FAILED}),
+        State.LOCK_FAILED: frozenset({State.EXECUTING, State.FAILED}),
+        State.LOCKED: frozenset(),
+        State.FAILED: frozenset(),
+    },
+    Kind.DEAL: {
+        **_WAITING,
+        State.APPROVED: frozenset({State.EXECUTING}),
+        State.EXECUTING: frozenset({State.WON, State.DEAL_FAILED}),
+        State.DEAL_FAILED: frozenset({State.EXECUTING, State.FAILED}),
+        State.WON: frozenset(),
+        State.FAILED: frozenset(),
+    },
 }
 assert all(not TRANSITIONS[k].get(s, ()) for k in Kind for s in TERMINAL_STATES)
 

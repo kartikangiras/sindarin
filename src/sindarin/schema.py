@@ -23,9 +23,13 @@ STATUS_FENCE = "sindarin-status"
 
 SLUG_PATTERN = r"^[a-z0-9][a-z0-9-]{0,47}$"
 RULE_PATTERN = r"^[a-z0-9][a-z0-9-]{0,63}$"
-ARTIFACT_ID_PATTERN = r"^(?:GOALS|BUDGET|ENTRIES)-\d+$"
+ARTIFACT_ID_PATTERN = r"^(?:GOALS|BUDGET|ENTRIES|CLOSE|PAY|LOCK|DEAL)-\d+$"
+DEAL_ID_PATTERN = r"^D-\d{4}-\d{2,5}$"
+PRODUCT_PATTERN = r"^[A-Za-z][A-Za-z0-9 -]{1,39}$"
 GOALS_ID_PATTERN = r"^GOALS-\d+$"
 BUDGET_ID_PATTERN = r"^BUDGET-\d+$"
+CLOSE_ID_PATTERN = r"^CLOSE-\d+$"
+PAY_ID_PATTERN = r"^PAY-\d+$"
 PERIOD_PATTERN = r"^\d{4}-(?:0[1-9]|1[0-2])$"
 INVOICE_PATTERN = r"^[A-Z][A-Z0-9-]{2,30}$"
 ACCOUNT_PATTERN = r"^\d{4}$"
@@ -39,22 +43,57 @@ Currency = Literal["USD", "EUR", "GBP", "INR"]
 
 
 class Kind(StrEnum):
+    # the planning chain
     GOALS = "goals"  # the period's targets; approved by the cfo; opens the plan room
     BUDGET = "budget"  # the department lines under the cap; cfo, the board above the limit
     ENTRIES = "entries"  # the budget register entries into the books; approved by controllers
+    # the month-end chain
+    CLOSE = "close"  # the month's plan; approved by controllers; opens the period room
+    PAY = "pay"  # a payment run; approved by the cfo (controllers under the limit)
+    LOCK = "lock"  # the adjusting entries and the period lock; approved by controllers
+    # sales
+    DEAL = "deal"  # a deal at a price; the discount band picks the approver; won into the books
 
 
-PREFIX: dict[Kind, str] = {Kind.GOALS: "GOALS", Kind.BUDGET: "BUDGET", Kind.ENTRIES: "ENTRIES"}
+PREFIX: dict[Kind, str] = {
+    Kind.GOALS: "GOALS",
+    Kind.BUDGET: "BUDGET",
+    Kind.ENTRIES: "ENTRIES",
+    Kind.CLOSE: "CLOSE",
+    Kind.PAY: "PAY",
+    Kind.LOCK: "LOCK",
+    Kind.DEAL: "DEAL",
+}
 KIND_OF_PREFIX: dict[str, Kind] = {v: k for k, v in PREFIX.items()}
 PLATFORM_OF: dict[Kind, str] = {
     Kind.GOALS: "switch",
     Kind.BUDGET: "ledger",
     Kind.ENTRIES: "ledger",
+    Kind.CLOSE: "switch",
+    Kind.PAY: "ledger",
+    Kind.LOCK: "ledger",
+    Kind.DEAL: "ledger",
 }
 ACTION_OF: dict[Kind, str] = {
     Kind.GOALS: "open_plan_room",
     Kind.BUDGET: "record_budget",
     Kind.ENTRIES: "post_budget_entries",
+    Kind.CLOSE: "open_period_room",
+    Kind.PAY: "pay_run",
+    Kind.LOCK: "lock_period",
+    Kind.DEAL: "record_deal",
+}
+# the chains: the room-opening kind, then the kinds that follow it in order
+ROOM_KINDS: frozenset[Kind] = frozenset({Kind.GOALS, Kind.CLOSE})
+CHAIN_OF: dict[Kind, tuple[Kind, Kind]] = {
+    Kind.GOALS: (Kind.BUDGET, Kind.ENTRIES),
+    Kind.CLOSE: (Kind.PAY, Kind.LOCK),
+}
+HEAD_OF: dict[Kind, Kind] = {
+    Kind.BUDGET: Kind.GOALS,
+    Kind.ENTRIES: Kind.GOALS,
+    Kind.PAY: Kind.CLOSE,
+    Kind.LOCK: Kind.CLOSE,
 }
 
 
@@ -127,6 +166,46 @@ def render_fence(tag: str, obj: Any) -> str:
 # ---------------------------------------------------------------------------------------------
 # proposal v3 bodies
 # ---------------------------------------------------------------------------------------------
+
+
+class EntryLine(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    account: str = Field(pattern=ACCOUNT_PATTERN)
+    debit_cents: int = Field(default=0, strict=True, ge=0)
+    credit_cents: int = Field(default=0, strict=True, ge=0)
+
+    @model_validator(mode="after")
+    def _one_side(self) -> EntryLine:
+        if (self.debit_cents > 0) == (self.credit_cents > 0):
+            raise ValueError("a line is either a debit or a credit")
+        return self
+
+
+class Entry(BaseModel):
+    """One balanced journal entry: debits equal credits, two to eight lines."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    memo: str = Field(min_length=1, max_length=120)
+    lines: list[EntryLine] = Field(min_length=2, max_length=8)
+
+    @model_validator(mode="after")
+    def _balanced(self) -> Entry:
+        debits = sum(x.debit_cents for x in self.lines)
+        credits = sum(x.credit_cents for x in self.lines)
+        if debits != credits:
+            raise ValueError(f"entry {self.memo!r} is not balanced ({debits} vs {credits})")
+        return self
+
+    @property
+    def amount_cents(self) -> int:
+        return sum(x.debit_cents for x in self.lines)
+
+
+class PayableLine(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    invoice: str = Field(pattern=INVOICE_PATTERN)
+    vendor: str = Field(min_length=1, max_length=80)
+    amount_cents: int = Field(strict=True, gt=0)
 
 
 class BudgetLine(BaseModel):
@@ -215,10 +294,104 @@ class EntriesBody(BaseModel):
         return sum(x.amount_cents for x in self.lines)
 
 
+class DealBody(BaseModel):
+    """A deal at a price: the product's list price from the price book, the price the account
+    executive wants, the discount that follows, the terms. Won into the books on approval."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    period: str = Field(pattern=PERIOD_PATTERN)
+    deal_id: str = Field(pattern=DEAL_ID_PATTERN)
+    account: str = Field(min_length=1, max_length=80)
+    product: str = Field(pattern=PRODUCT_PATTERN)
+    list_cents: int = Field(strict=True, gt=0)
+    price_cents: int = Field(strict=True, gt=0)
+    discount_bps: int = Field(strict=True, ge=0, le=10000)
+    terms: Literal["standard", "net60", "sla"] = "standard"
+    currency: Currency = "USD"
+
+    @model_validator(mode="after")
+    def _priced(self) -> DealBody:
+        if self.price_cents > self.list_cents:
+            raise ValueError("the price is above the list price")
+        bps = round((self.list_cents - self.price_cents) * 10000 / self.list_cents)
+        if bps != self.discount_bps:
+            raise ValueError(f"discount_bps {self.discount_bps} is not the discount ({bps})")
+        return self
+
+    @property
+    def discount_cents(self) -> int:
+        return self.list_cents - self.price_cents
+
+
+class CloseBody(BaseModel):
+    """The month's plan: what will be posted, what will be paid, what the business is told."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    period: str = Field(pattern=PERIOD_PATTERN)
+    title: str = Field(min_length=1, max_length=120)
+    summary: str = Field(min_length=1, max_length=300)
+    report: list[str] = Field(default_factory=list, max_length=10)
+    entries: list[Entry] = Field(default_factory=list, max_length=20)
+    payables: list[str] = Field(default_factory=list, max_length=50)
+    total_payables_cents: int = Field(default=0, strict=True, ge=0)
+    currency: Currency = "USD"
+
+    @field_validator("report")
+    @classmethod
+    def _lines(cls, v: list[str]) -> list[str]:
+        for s in v:
+            if not s.strip() or len(s) > 160:
+                raise ValueError("each report line must be 1-160 characters")
+        return v
+
+    @field_validator("payables")
+    @classmethod
+    def _invoices(cls, v: list[str]) -> list[str]:
+        for s in v:
+            if not re.match(INVOICE_PATTERN, s):
+                raise ValueError(f"bad invoice id {s!r}")
+        _unique(v, "payables")
+        return v
+
+
+class PayBody(BaseModel):
+    """A payment run: the open payables the approved plan named, as the ledger holds them."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    period: str = Field(pattern=PERIOD_PATTERN)
+    plan: str = Field(pattern=CLOSE_ID_PATTERN)
+    run: list[PayableLine] = Field(min_length=1, max_length=50)
+    total_cents: int = Field(strict=True, gt=0)
+    currency: Currency = "USD"
+
+    @model_validator(mode="after")
+    def _sums(self) -> PayBody:
+        _unique([x.invoice for x in self.run], "invoices")
+        total = sum(x.amount_cents for x in self.run)
+        if total != self.total_cents:
+            raise ValueError(f"total_cents {self.total_cents} is not the sum of the run ({total})")
+        return self
+
+
+class LockBody(BaseModel):
+    """The adjusting entries and the lock of the period, after its payment run is paid."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    period: str = Field(pattern=PERIOD_PATTERN)
+    plan: str = Field(pattern=CLOSE_ID_PATTERN)
+    pay_run: str = Field(default="", pattern=r"^(?:PAY-\d+)?$")
+    entries: list[Entry] = Field(min_length=1, max_length=20)
+    memo: str = Field(min_length=1, max_length=200)
+
+
 BODY_OF: dict[Kind, type[BaseModel]] = {
     Kind.GOALS: GoalsBody,
     Kind.BUDGET: BudgetBody,
     Kind.ENTRIES: EntriesBody,
+    Kind.CLOSE: CloseBody,
+    Kind.PAY: PayBody,
+    Kind.LOCK: LockBody,
+    Kind.DEAL: DealBody,
 }
 
 
@@ -234,6 +407,33 @@ def entries_target(period: str) -> str:
     return f"period:{period}"
 
 
+def close_target(period: str) -> str:
+    return f"close-{period}"
+
+
+def pay_target(period: str) -> str:
+    return f"payables:{period}"
+
+
+def lock_target(period: str) -> str:
+    return f"lock:{period}"
+
+
+def deal_target(deal_id: str) -> str:
+    return f"deal:{deal_id}"
+
+
+TARGET_OF = {
+    Kind.GOALS: goals_target,
+    Kind.BUDGET: budget_target,
+    Kind.ENTRIES: entries_target,
+    Kind.CLOSE: close_target,
+    Kind.PAY: pay_target,
+    Kind.LOCK: lock_target,
+}
+STANDALONE_KINDS: frozenset[Kind] = frozenset({Kind.DEAL})
+
+
 class Proposal(BaseModel):
     """What an agent posts inside a ```sindarin-proposal fence. No extras, all typed."""
 
@@ -242,10 +442,18 @@ class Proposal(BaseModel):
     schema_: Literal["sindarin/proposal/v3"] = Field(alias="schema")
     kind: Kind
     platform: Literal["switch", "ledger"]
-    action: Literal["open_plan_room", "record_budget", "post_budget_entries"]
+    action: Literal[
+        "open_plan_room",
+        "record_budget",
+        "post_budget_entries",
+        "open_period_room",
+        "pay_run",
+        "lock_period",
+        "record_deal",
+    ]
     target: str = Field(min_length=1, max_length=200)
     snapshot_hint: str = Field(default="", max_length=64)
-    body: GoalsBody | BudgetBody | EntriesBody
+    body: GoalsBody | BudgetBody | EntriesBody | CloseBody | PayBody | LockBody | DealBody
     ask: str = Field(default="", max_length=MESSAGE_ID_MAX)
     rule: str = Field(pattern=RULE_PATTERN)
     justification: str = Field(max_length=MAX_JUSTIFICATION)
@@ -272,15 +480,16 @@ class Proposal(BaseModel):
         if not isinstance(self.body, BODY_OF[self.kind]):
             raise ValueError(f"body does not fit kind {self.kind.value}")
         period = self.body.period
-        if self.kind is Kind.GOALS:
-            if self.target != goals_target(period):
-                raise ValueError(f"goals target is the plan room slug, {goals_target(period)}")
-            if self.snapshot_hint:
-                raise ValueError("goals proposals carry no snapshot_hint")
-        elif self.kind is Kind.BUDGET and self.target != budget_target(period):
-            raise ValueError(f"budget target is {budget_target(period)}")
-        elif self.kind is Kind.ENTRIES and self.target != entries_target(period):
-            raise ValueError(f"entries target is {entries_target(period)}")
+        if self.kind is Kind.DEAL:
+            if self.target != deal_target(self.body.deal_id):  # type: ignore[union-attr]
+                raise ValueError(f"deal target is deal:{self.body.deal_id}")  # type: ignore[union-attr]
+            return self
+        want = TARGET_OF[self.kind](period)
+        if self.target != want:
+            what = "the room slug" if self.kind in ROOM_KINDS else "the ledger target"
+            raise ValueError(f"{self.kind.value} target is {what}, {want}")
+        if self.kind in ROOM_KINDS and self.snapshot_hint:
+            raise ValueError(f"{self.kind.value} proposals carry no snapshot_hint")
         if self.snapshot_hint and not re.match(DIGEST_PATTERN, self.snapshot_hint):
             raise ValueError("snapshot_hint must be a sha256 hex digest")
         return self
@@ -353,31 +562,68 @@ class State(StrEnum):
     RECORD_FAILED = "record_failed"
     PLANNED = "planned"
     PLAN_FAILED = "plan_failed"
+    PAID = "paid"
+    PAY_FAILED = "pay_failed"
+    LOCKED = "locked"
+    LOCK_FAILED = "lock_failed"
+    WON = "won"
+    DEAL_FAILED = "deal_failed"
     FAILED = "failed"
     DENIED = "denied"
     EXPIRED = "expired"
 
 
 TERMINAL_STATES = frozenset(
-    {State.DONE, State.RECORDED, State.PLANNED, State.FAILED, State.DENIED, State.EXPIRED}
+    {
+        State.DONE,
+        State.RECORDED,
+        State.PLANNED,
+        State.PAID,
+        State.LOCKED,
+        State.WON,
+        State.FAILED,
+        State.DENIED,
+        State.EXPIRED,
+    }
 )
 WAITING_STATES = frozenset({State.PENDING, State.CHANGES_REQUESTED})
-RETRY_STATES = frozenset({State.OPEN_FAILED, State.RECORD_FAILED, State.PLAN_FAILED})
+RETRY_STATES = frozenset(
+    {
+        State.OPEN_FAILED,
+        State.RECORD_FAILED,
+        State.PLAN_FAILED,
+        State.PAY_FAILED,
+        State.LOCK_FAILED,
+        State.DEAL_FAILED,
+    }
+)
 IN_FLIGHT_STATES = frozenset({State.APPROVED, State.EXECUTING, State.OPENING})
 SUCCESS_OF: dict[Kind, State] = {
     Kind.GOALS: State.OPEN,
     Kind.BUDGET: State.RECORDED,
     Kind.ENTRIES: State.PLANNED,
+    Kind.CLOSE: State.OPEN,
+    Kind.PAY: State.PAID,
+    Kind.LOCK: State.LOCKED,
+    Kind.DEAL: State.WON,
 }
 FAILURE_OF: dict[Kind, State] = {
     Kind.GOALS: State.OPEN_FAILED,
     Kind.BUDGET: State.RECORD_FAILED,
     Kind.ENTRIES: State.PLAN_FAILED,
+    Kind.CLOSE: State.OPEN_FAILED,
+    Kind.PAY: State.PAY_FAILED,
+    Kind.LOCK: State.LOCK_FAILED,
+    Kind.DEAL: State.DEAL_FAILED,
 }
 RUNNING_OF: dict[Kind, State] = {
     Kind.GOALS: State.OPENING,
     Kind.BUDGET: State.EXECUTING,
     Kind.ENTRIES: State.EXECUTING,
+    Kind.CLOSE: State.OPENING,
+    Kind.PAY: State.EXECUTING,
+    Kind.LOCK: State.EXECUTING,
+    Kind.DEAL: State.EXECUTING,
 }
 
 

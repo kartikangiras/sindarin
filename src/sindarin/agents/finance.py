@@ -112,11 +112,14 @@ def report_lines(s: dict[str, Any], currency: str = "USD") -> list[str]:
     margin = f"Margin {percent(s['margin_bps'])}"
     if t:
         margin += f" against a target of {percent(t['margin_bps'])}"
+    open_rows = [p for p in s["payables"] if p["status"] == "open"]
     lines = [
         revenue,
         costs,
         margin,
         "Top customers: " + ", ".join(f"{c} {money(v, currency)}" for c, v in top),
+        f"Open payables {money(sum(p['amount_cents'] for p in open_rows), currency)} "
+        f"({len(open_rows)} invoices)",
     ]
     if s["duplicate_invoices"]:
         dup = ", ".join(s["duplicate_invoices"])
@@ -184,6 +187,42 @@ def standard_budget_lines(cap_cents: int) -> list[dict[str, Any]]:
         if cents > 0:
             lines.append({"department": department, "account": account, "amount_cents": cents})
     return lines
+
+
+def standard_entries(ledger: Ledger, period: str) -> list[dict[str, Any]]:
+    """The month's adjusting entries, computed, never typed: straight-line depreciation,
+    accrued payroll, and a reversal of any duplicate sales row the analyst found."""
+    s = ledger.summary(period)
+    entries: list[dict[str, Any]] = [
+        {
+            "memo": f"Depreciation {month_label(period)}",
+            "lines": [
+                {"account": DEPRECIATION, "debit_cents": 120000},
+                {"account": ACCUM_DEPRECIATION, "credit_cents": 120000},
+            ],
+        },
+        {
+            "memo": f"Accrued payroll {month_label(period)}",
+            "lines": [
+                {"account": PAYROLL, "debit_cents": 650000},
+                {"account": ACCRUED, "credit_cents": 650000},
+            ],
+        },
+    ]
+    amounts = {row["invoice"]: row["amount_cents"] for row in ledger.sales(period)}
+    for inv in s["duplicate_invoices"]:
+        cents = int(amounts.get(inv, 0))
+        if cents > 0:
+            entries.append(
+                {
+                    "memo": f"Reverse duplicate sale {inv}",
+                    "lines": [
+                        {"account": REVENUE, "debit_cents": cents},
+                        {"account": RECEIVABLE, "credit_cents": cents},
+                    ],
+                }
+            )
+    return entries
 
 
 def approver_mention(ctx: RoleContext, kind: Kind) -> str:

@@ -25,7 +25,9 @@ from sindarin.names import (
     DISPLAY,
     LEDGER_EXECUTOR,
     PLANNER,
+    SALES,
     SWITCH_EXECUTOR,
+    TREASURY,
 )
 
 ENV_KEYS = (
@@ -49,8 +51,12 @@ ROOT_ENV_KEYS: dict[str, tuple[str, ...]] = {
     ANALYST: ("ANTHROPIC_API_KEY",),
     BOOKKEEPER: ("ANTHROPIC_API_KEY",),
     PLANNER: ("ANTHROPIC_API_KEY",),
+    TREASURY: ("ANTHROPIC_API_KEY",),
+    SALES: ("ANTHROPIC_API_KEY",),
     SWITCH_EXECUTOR: ("SWITCH_GATEWAY_URL", "SWITCH_GATEWAY_EMAIL", "SWITCH_GATEWAY_PASSWORD"),
-    LEDGER_EXECUTOR: (),  # the ledger file is the credential; only this process writes it
+    # the ledger file is the credential; the Google service-account key (for the write-back
+    # into the team's sheet) reaches only this process
+    LEDGER_EXECUTOR: ("SINDARIN_LEDGER_GOOGLE_SA",),
 }
 PROCESSES = tuple(ROOT_ENV_KEYS)
 # Read by `sindarin bootstrap` and the live scripts, never by a process: a Mattermost server of
@@ -186,6 +192,7 @@ class Env:
     gateway_url: str = ""
     gateway_email: str = ""
     gateway_password: str = ""
+    google_sa: str = ""  # path to the service-account key, sindarin-ledger only
 
     @classmethod
     def from_values(cls, v: dict[str, str]) -> Env:
@@ -197,6 +204,7 @@ class Env:
             gateway_url=(v.get("SWITCH_GATEWAY_URL") or v.get("SWITCH_BRIDGE_URL", "")).rstrip("/"),
             gateway_email=v.get("SWITCH_GATEWAY_EMAIL", ""),
             gateway_password=v.get("SWITCH_GATEWAY_PASSWORD", ""),
+            google_sa=v.get("SINDARIN_LEDGER_GOOGLE_SA", ""),
         )
 
     def missing(self, *names: str) -> list[str]:
@@ -212,7 +220,12 @@ class Env:
         return [n for n in names if not mapping[n]]
 
 
-DEFAULT_ROOM_NAMES = {"finance": "#acme-finance", "planning": "#planning"}
+DEFAULT_ROOM_NAMES = {
+    "finance": "#acme-finance",
+    "planning": "#planning",
+    "payments": "#payments",
+    "sales": "#sales",
+}
 
 
 class ExecutorConfig(BaseModel):
@@ -233,6 +246,7 @@ class ExecutorConfig(BaseModel):
     # sindarin-ledger
     ledger_db: str = "books.db"  # the ledger file (ledger.db is the executor's own state)
     data_dir: str = "../data/acme"  # the period folders `sindarin ledger import` loads
+    sheet_url: str = ""  # the team's Google Sheet the ledger mirrors (import and write-back)
     # sindarin-switch
     room_creation: str = Field(default="gateway", pattern="^(gateway|agent_op)$")
     addressing: str = Field(default="rooms", pattern="^(rooms|open)$")  # layer 0 (§5, §12.4 item 5)
@@ -264,13 +278,13 @@ class ExecutorConfig(BaseModel):
 
 HEADER = {
     "switch": (
-        "# sindarin-switch (design v5 §5). Owns GOALS-n and the board. Secrets live in the root "
-        ".env, never here.\n"
+        "# sindarin-switch (design v5 §5). Owns GOALS-n, CLOSE-n and the board. Secrets live in "
+        "the root .env, never here.\n"
         "# Room ids and participant ids are in agents/policy/policy.yaml; bootstrap writes both.\n"
     ),
     "ledger": (
-        "# sindarin-ledger (design v5 §5). Owns BUDGET-n and ENTRIES-n; the only process that "
-        "writes ledger_db.\n"
+        "# sindarin-ledger (design v5 §5). Owns BUDGET-n, ENTRIES-n, PAY-n and LOCK-n; the only "
+        "process that writes ledger_db.\n"
         "# Secrets live in the root .env, never here.\n"
     ),
 }

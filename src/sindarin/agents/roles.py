@@ -16,9 +16,10 @@ from sindarin.users import Users, load_users
 
 PLAN_ID_RE = re.compile(r"\bGOALS-\d+\b")
 BUDGET_ID_RE = re.compile(r"\bBUDGET-\d+\b")
-# the goals posted into a plan room by sindarin-switch (its brief): context, never a call to act
-BRIEF_RE = re.compile(r"\*\*(GOALS-\d+)\*\* instructions", re.IGNORECASE)
-PENDING_RE = re.compile(r"\*\*((?:GOALS|BUDGET|ENTRIES)-\d+)\*\* pending")
+CLOSE_ID_RE = re.compile(r"\bCLOSE-\d+\b")
+# the goals or the plan posted into a room by sindarin-switch (its brief): context, never a call
+BRIEF_RE = re.compile(r"\*\*((?:GOALS|CLOSE)-\d+)\*\* instructions", re.IGNORECASE)
+PENDING_RE = re.compile(r"\*\*((?:GOALS|BUDGET|ENTRIES|CLOSE|PAY|LOCK|DEAL)-\d+)\*\* pending")
 
 
 @dataclass
@@ -31,7 +32,12 @@ class RoleContext:
     ledger: Ledger | None = None  # read-only; every number an agent shows comes from it
     memory: dict[str, Any] = field(default_factory=dict)
     room_names: dict[str, str] = field(
-        default_factory=lambda: {"finance": "#acme-finance", "planning": "#planning"}
+        default_factory=lambda: {
+            "finance": "#acme-finance",
+            "planning": "#planning",
+            "payments": "#payments",
+            "sales": "#sales",
+        }
     )
 
     def policy(self) -> Policy:

@@ -16,7 +16,7 @@ class FakeSwitchRooms:
     """Enough of the Gateway rooms route for the goals gate."""
 
     platform: str = "switch"
-    kinds: frozenset[Kind] = frozenset({Kind.GOALS})
+    kinds: frozenset[Kind] = frozenset({Kind.GOALS, Kind.CLOSE})
     rooms: dict[str, dict[str, Any]] = field(default_factory=dict)  # slug → room
     calls: list[tuple[str, str]] = field(default_factory=list)
     fail_execute_times: int = 0

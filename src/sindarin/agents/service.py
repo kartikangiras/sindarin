@@ -10,7 +10,7 @@ from collections import defaultdict
 from pathlib import Path
 from types import ModuleType
 
-from sindarin.agents import analyst, bookkeeper, planner
+from sindarin.agents import analyst, bookkeeper, planner, sales, treasury
 from sindarin.agents.base import (
     RoleAgent,
     ScriptedModel,
@@ -31,6 +31,8 @@ ROLES: dict[str, ModuleType] = {
     analyst.NAME: analyst,
     planner.NAME: planner,
     bookkeeper.NAME: bookkeeper,
+    treasury.NAME: treasury,
+    sales.NAME: sales,
 }
 
 

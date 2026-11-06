@@ -14,7 +14,7 @@ from sindarin.schema import CURRENCIES, RULE_PATTERN, Kind, Proposal
 
 DURATION_RE = re.compile(r"^(\d+)(m|h|d)$")
 _UNITS = {"m": 60, "h": 3600, "d": 86400}
-ROOM_KEYS = ("finance", "planning")
+ROOM_KEYS = ("finance", "planning", "payments", "sales")
 PERIOD_ROOM = "period"  # the artifact's own room: the plan room the goals opened
 
 
@@ -66,16 +66,17 @@ class Rule(BaseModel):
 
     @model_validator(mode="after")
     def _fits_kind(self) -> Rule:
-        if self.kind is Kind.GOALS and self.room == PERIOD_ROOM:
-            raise ValueError(f"rule {self.name}: goals are approved in a named room")
-        if self.kind is Kind.BUDGET and self.room == PERIOD_ROOM:
-            raise ValueError(f"rule {self.name}: budgets are approved in a named room")
-        if self.kind is Kind.ENTRIES and self.room != PERIOD_ROOM:
-            raise ValueError(f"rule {self.name}: the entries are approved in the plan room")
+        in_room = self.kind in (Kind.ENTRIES, Kind.LOCK)
+        if not in_room and self.room == PERIOD_ROOM:
+            raise ValueError(f"rule {self.name}: {self.kind.value} is approved in a named room")
+        if in_room and self.room != PERIOD_ROOM:
+            raise ValueError(
+                f"rule {self.name}: {self.kind.value} is approved in the room the chain opened"
+            )
         if (self.limit_cents is None) != (not self.approvers_under_limit):
             raise ValueError(f"rule {self.name}: limit_cents and approvers_under_limit go together")
-        if self.limit_cents is not None and self.kind is not Kind.BUDGET:
-            raise ValueError(f"rule {self.name}: only a budget rule has a limit")
+        if self.limit_cents is not None and self.kind not in (Kind.BUDGET, Kind.PAY, Kind.DEAL):
+            raise ValueError(f"rule {self.name}: only a budget, pay or deal rule has a limit")
         return self
 
     @property
@@ -239,6 +240,8 @@ def check_target(policy: Policy, proposal: Proposal) -> str | None:
         return f"currency {currency} is not rule {rule.name}'s {rule.currency}"
     if proposal.kind is Kind.GOALS and body.cost_cap_cents >= body.revenue_target_cents:
         return "the cost cap must sit below the revenue target"
+    if proposal.kind is Kind.CLOSE and body.payables and body.total_payables_cents <= 0:
+        return "a plan that names payables must carry their total"
     return None
 
 
@@ -248,7 +251,40 @@ def check_facts(policy: Policy, proposal: Proposal, facts: dict[str, Any]) -> st
     if rule is None:
         return f"unknown rule {proposal.rule!r}"
     body: Any = proposal.body
-    if proposal.kind is Kind.GOALS:
+    if proposal.kind in (Kind.GOALS, Kind.CLOSE):
+        return None
+    if proposal.kind is Kind.PAY:
+        rows = {r["invoice"]: r for r in facts.get("payables", [])}
+        for line in body.run:
+            r = rows.get(line.invoice)
+            if r is None:
+                return f"{line.invoice} is not in the ledger"
+            if r["status"] != "open":
+                return f"{line.invoice} is {r['status']}, not open"
+            if int(r["amount_cents"]) != line.amount_cents or r["vendor"] != line.vendor:
+                return f"{line.invoice} differs from the ledger"
+        if int(facts.get("total_cents", -1)) != body.total_cents:
+            return "the run's total differs from the ledger"
+        return None
+    if proposal.kind is Kind.DEAL:
+        if not facts.get("list_cents"):
+            return f"{body.product} is not in the price book"
+        if int(facts["list_cents"]) != body.list_cents:
+            from sindarin.schema import money
+
+            have = money(int(facts["list_cents"]), rule.currency)
+            want = money(body.list_cents, rule.currency)
+            return f"the list price of {body.product} is {have}, not {want}"
+        if facts.get("period_status") == "locked":
+            return f"period {body.period} is locked; the deal cannot land in it"
+        if facts.get("deal_stage") == "won":
+            return f"{body.deal_id} is already won"
+        return None
+    if proposal.kind is Kind.LOCK:
+        if facts.get("period_status") != "open":
+            return f"period {body.period} is {facts.get('period_status') or 'unknown'}, not open"
+        if int(facts.get("open_payables", 0)) > 0:
+            return f"{facts['open_payables']} payable(s) still open in {body.period}"
         return None
     if proposal.kind is Kind.BUDGET:
         known = set(facts.get("accounts", []))

@@ -246,6 +246,141 @@ class GatewayClient:
         ]
         return {"agents": [str(a) for a in agents if a], "users": [str(u) for u in users if u]}
 
+    # -- the Switch components around a room: groups, documents, links, budgets ----------------
+
+    def room_groups(self) -> list[dict[str, Any]]:
+        data = self._req("GET", "/gateway/room-groups")
+        if isinstance(data, dict):
+            data = data.get("groups", data.get("items", []))
+        return list(data or [])
+
+    def ensure_room_group(self, name: str, description: str = "") -> str:
+        """The id of the room group called `name`, created when missing."""
+        for g in self.room_groups():
+            if g.get("name") == name and g.get("id"):
+                return str(g["id"])
+        data = self._req(
+            "POST", "/gateway/room-groups", json={"name": name, "description": description or None}
+        )
+        return str(data.get("id") or data.get("group", {}).get("id"))
+
+    def group_rooms(self, group_id: str) -> list[str]:
+        for g in self.room_groups():
+            if str(g.get("id")) == group_id:
+                rooms = g.get("room_ids") or g.get("rooms") or []
+                return [str(r.get("id") if isinstance(r, dict) else r) for r in rooms]
+        return []
+
+    def assign_rooms_to_group(self, group_id: str, room_ids: list[str]) -> None:
+        self._req("PUT", f"/gateway/room-groups/{group_id}/rooms", json={"room_ids": room_ids})
+
+    def put_room_group(self, room_id: str, group_id: str | None) -> None:
+        """Put one room into a group (or out of every group with None)."""
+        self._req("PUT", f"/gateway/rooms/{room_id}/group", json={"group_id": group_id})
+
+    def create_document(
+        self, *, name: str, description: str, instructions: str, content: str
+    ) -> str:
+        """A Switch document: the brief as a document a room can carry."""
+        data = self._req(
+            "POST",
+            "/gateway/documents",
+            json={
+                "name": name,
+                "description": description,
+                "instructions": instructions,
+                "content": content,
+            },
+        )
+        return str(data.get("id") or data.get("document", {}).get("id"))
+
+    def attach_document(self, room_id: str, document_id: str) -> None:
+        self._req("POST", f"/gateway/rooms/{room_id}/documents/{document_id}", json={})
+
+    def link_rooms(self, room_id: str, target_room_id: str, label: str) -> None:
+        self._req(
+            "POST",
+            f"/gateway/rooms/{room_id}/linked-rooms",
+            json={"target_room_id": target_room_id, "label": label},
+        )
+
+    def current_tenant_id(self) -> str:
+        data = self._req("GET", "/gateway/tenants/current")
+        return str(data.get("id", ""))
+
+    def budgets(self) -> list[dict[str, Any]]:
+        tenant = self.current_tenant_id()
+        data = self._req("GET", f"/gateway/tenants/{tenant}/budgets")
+        if isinstance(data, dict):
+            data = data.get("budgets", data.get("items", []))
+        return list(data or [])
+
+    def create_budget(
+        self,
+        agent_id: str,
+        *,
+        metric: str = "output_tokens",
+        model: str = "*",
+        amount_limit: int = 200000,
+        period_hours: int = 24,
+    ) -> dict[str, Any]:
+        """A usage budget on one agent, Switch's own cap on what it may spend."""
+        tenant = self.current_tenant_id()
+        return self._req(
+            "POST",
+            f"/gateway/tenants/{tenant}/budgets",
+            json={
+                "agent_id": agent_id,
+                "metric": metric,
+                "model": model,
+                "amount_limit": amount_limit,
+                "period_hours": period_hours,
+            },
+        )
+
+    def join_chat(self, room_id: str) -> None:
+        """Make the signed-in user a member of the room's chat, which the chat routes
+        (messages, attachments) require even for an admin."""
+        me = self.me()
+        uid = me.get("id") or me.get("user", {}).get("id")
+        self._req("POST", f"/gateway/chats/{room_id}/members", json={"userId": uid})
+
+    def upload_attachment(self, room_id: str, filename: str, data: bytes, mime: str) -> str:
+        """`POST /gateway/chats/{room}/attachments`: the upload id a message can carry."""
+        import uuid
+
+        r = self._http.post(
+            f"/gateway/chats/{room_id}/attachments",
+            data={"uploadId": str(uuid.uuid4())},
+            files={"file": (filename, data, mime)},
+        )
+        if r.status_code not in (200, 201):
+            raise GatewayError(r.status_code, _detail(r), f"/gateway/chats/{room_id}/attachments")
+        body = r.json()
+        upload = body.get("uploadId") or body.get("upload_id") or body.get("id")
+        if not upload:
+            raise GatewayError(r.status_code, "no upload id in the reply", "attachments")
+        return str(upload)
+
+    def send_message(
+        self,
+        room_id: str,
+        body: str,
+        *,
+        upload_ids: list[str] | None = None,
+        thread_root_id: str | None = None,
+    ) -> dict[str, Any]:
+        """`POST /gateway/chats/{room}/messages`: a message with attachments, in a thread."""
+        import uuid
+
+        payload: dict[str, Any] = {"requestId": str(uuid.uuid4()), "body": body}
+        if upload_ids:
+            payload["uploadIds"] = list(upload_ids)
+        if thread_root_id:
+            payload["threadRootId"] = thread_root_id
+        data = self._req("POST", f"/gateway/chats/{room_id}/messages", json=payload)
+        return data if isinstance(data, dict) else {"result": data}
+
     def add_room_agents(self, room_id: str, agent_ids: list[str]) -> None:
         self._req("POST", f"/gateway/rooms/{room_id}/agents", json={"agent_ids": agent_ids})
 
