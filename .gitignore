@@ -22,3 +22,6 @@ executor/*.log
 *.md
 !README.md
 !agents/*/AGENT.md
+# landing page videos: served from their CDN on GitHub Pages, shipped with the hosted artifact only
+docs/media/
+.vercel/

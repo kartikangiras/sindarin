@@ -1,19 +1,19 @@
 # Sindarin
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/brand/wordmark-dark.png">
-  <img src="docs/brand/wordmark.png" alt="Sindarin" width="320">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/brand/logo-dark.svg">
+  <img src="docs/brand/logo.svg" alt="Sindarin" width="300">
 </picture>
 
 **An agent can propose, only a verified human can authorize, and the code that executes trusts
-neither the agent nor the chat text.**
+neither the agent nor the chat text.** Landing page: [sindarin-nu.vercel.app](https://sindarin-nu.vercel.app).
 
-Every agent platform says "keep a human in the loop". In the Switch kickoff demo the agent asked
-"shall I do it?", a person typed "yes", and the same agent did it. Nobody checked who said yes,
-what exactly was approved, or whether it was said twice. Sindarin is that check, built as the
-management workflows a company runs every month inside Switch's chat app: the planning cycle,
-the month-end close and the deals sales brings in, seven gates on one engine, with the reports,
-exports and charts the team expects and the team's own spreadsheet as the record.
+Most agent demos keep a human in the loop the same way: the agent asks "shall I do it?", a
+person types "yes", and the same agent does it. Nobody checks who said yes, what was approved,
+or whether it was said twice. Sindarin is that check, built as the finance workflows a company
+runs every month inside Switch's chat app: the plan, the month-end close and the sales deals.
+Seven gates run on one engine, with the reports, exports and charts the team expects, and the
+team's own spreadsheet is the record.
 
 ```
 plan   ask → analyst reports the month, planner proposes the goals ──[CFO]──► plan room opens
@@ -33,8 +33,8 @@ Agents draft, people commit, executors act. Five LLM agents (`analyst`, `planner
 comes from a tool that read the ledger. Two deterministic executors (`sindarin-switch`,
 `sindarin-ledger`) hold one credential each and accept exactly two inputs: a JSON fence from a
 named agent, and a seven-word command from a named human. Every step has the same shape, and
-each executor hands the work to the next agent with one stage line, so a chain runs the same
-way every month and a new chain is rules, an agent and tests on the same engine.
+each executor hands the work to the next agent with one stage line. A chain runs the same way
+every month, and a new chain is rules, an agent and tests on the same engine.
 
 ## Reproduce it in ten minutes
 
@@ -49,10 +49,10 @@ scripts/demo.sh                 # Switch + Mattermost in Docker, the ledger, the
 Then open http://localhost:8065, team `switch`, sign in as `user` with the password
 `Sindarin-demo-1`, and in `#acme-finance` type `@analyst @planner plan November`. The analyst
 reports October from the ledger, the planner proposes `GOALS-1`, and `@sindarin-switch approve
-GOALS-1` opens the plan room. The full script of all three workflows is under *Demo* below;
+GOALS-1` opens the plan room. The full script of all three workflows is under *Demo* below.
 `uv run pytest` runs 186 tests, eleven of them adversarial. Without an Anthropic key the agents
 run a deterministic stand-in through the same tools and validators, so every gate, refusal and
-report still happens. `scripts/demo.sh stop` stops the processes; `scripts/reset_demo.sh
+report still happens. `scripts/demo.sh stop` stops the processes, and `scripts/reset_demo.sh
 --rooms` puts the lab back to the start.
 
 ## How Switch is used
@@ -61,9 +61,10 @@ report still happens. `scripts/demo.sh stop` stops the processes; `scripts/reset
   executors are lists of ids in `agents/policy/policy.yaml`; display names are never consulted.
   An impostor named "Isaac" gets the same refusal as the sales person.
 - **Rooms.** `#acme-finance`, `#planning`, `#payments`, `#sales` and the rooms a chain opens
-  (`#plan-<period>`, `#close-<period>`) are Switch rooms bridged to Mattermost. The executor opens the room when
-  the first gate passes, with the approvers, the chain's agents and `sindarin-ledger` as members
-  and the brief as its instructions; `brief` re-posts it to anyone who asks.
+  (`#plan-<period>`, `#close-<period>`) are Switch rooms bridged to Mattermost. The executor
+  opens the room when the first gate passes, with the approvers, the chain's agents and
+  `sindarin-ledger` as members and the brief as its instructions. `brief` re-posts it to anyone
+  who asks.
 - **Documents, groups, links.** The brief is also a Switch document attached to the room, the
   room is linked from `#acme-finance` and joins the "Acme finance" room group, so the Switch
   console shows the month as one thing.
@@ -77,7 +78,7 @@ report still happens. `scripts/demo.sh stop` stops the processes; `scripts/reset
 - **Agents.** The seven agents are registered by the bootstrap through the Gateway API as
   external agents and connect over Switch's agent protocol with their own keys; the Switch
   Console lists them next to the rooms, the room group, the documents and the budgets. The five
-  LLM roles can also be created the way the kickoff demo showed, as Console-run Claude Code agents, from
+  LLM roles can also be created as Console-run Claude Code agents, from
   `templates/sindarin.template.yaml` (Console → Templates; the Gateway's validator accepts it).
   The two executors stay external by design: they are deterministic code holding a credential,
   and a prompt-driven agent cannot be the thing that verifies.
@@ -93,8 +94,8 @@ Mattermost user Switch's stack seeds next to the admin (`MATTERMOST_USER` in
 group. Its password is `MATTERMOST_USER_PASSWORD` from `.env` when you set one, otherwise the
 bootstrap sets the demo password `Sindarin-demo-1`. You are the only person in the demo; the
 four-person team described under *member-specific workflows* is optional
-(`PEOPLE=cast scripts/demo.sh`). `uv run sindarin doctor` says what is
-missing if anything is. The pieces, if you prefer them one by one: `PROFILES="gateway collab"
+(`PEOPLE=cast scripts/demo.sh`). `uv run sindarin doctor` says what is missing, if anything
+is. The pieces, if you prefer them one by one: `PROFILES="gateway collab"
 scripts/switch_stack.sh up` · `uv run sindarin ledger import` · `uv run sindarin bootstrap` ·
 `scripts/dev_stack.sh start [--fake]`. `scripts/reset_demo.sh --rooms` wipes the executors'
 state, reloads the ledger and removes the rooms a run opened.
@@ -125,8 +126,8 @@ for the deals, `price_book`, with money as cents (`amount_cents`) or as decimals
 - **The sample.** `data/acme/2026-10/` holds October: thirteen sales rows with one duplicate,
   three payables, the targets October was given, a price book of three products.
 
-A file need not be imported from a terminal at all: paste its link to `@sindarin-switch read`
-to see what it holds, then `@sindarin-ledger load` to take it into the books (see *Reports*).
+You can skip the terminal for files. Paste a link to `@sindarin-switch read` to see what the
+file holds, then `@sindarin-ledger load` to take it into the books (see *Reports*).
 
 The "books moved" moment works on any of them: a sale typed in chat
 (`@sindarin-ledger sale S-2026-1055 3980.00 Contoso Ltd`) or a row added to the sheet between a
@@ -189,9 +190,9 @@ Vincent (sales, no group). Each gate then answers to exactly its group: Vincent'
 `approve GOALS-1` is refused as *"Vincent is not in the cfo group"*; John's `approve BUDGET-1`
 is refused as *"16,000.00 USD needs the board group; cfo may approve up to 10,000.00 USD"*;
 Leonardo's `approve PAY-1` is refused above the payment limit and his `approve DEAL-1` above the
-discount limit; an impostor renamed "Isaac" is refused like Vincent. `--people both` keeps you in every group alongside them;
-`scripts/rehearse.py --chain plan|close|sales` plays the team through any chain against the
-live stack.
+discount limit; an impostor renamed "Isaac" is refused like Vincent. `--people both` keeps you
+in every group alongside them, and `scripts/rehearse.py --chain plan|close|sales` plays the
+team through any chain against the live stack.
 
 ## How enforcement works (`src/sindarin/executor/core.py`, pure, no I/O)
 
@@ -201,8 +202,8 @@ live stack.
   of the chain (the cap), never from the agent's fence.
 - **A2** the sender's participant id must be in the group the rule names; for a budget, a
   payment run or a deal the group is chosen on the total the executor read (the discount, for
-  a deal), so the limit decides who may say yes. **A3** agents and executors are refused whatever they type, and the one who proposed
-  never approves.
+  a deal), so the limit decides who may say yes. **A3** agents and executors are refused
+  whatever they type, and the one who proposed never approves.
 - **A4** single use: the artifact must be `pending` and inside its TTL. **A5** the command must
   come from the rule's room. **A6** the ledger is re-read; if it moved, the approval is refused,
   the snapshot replaced and the agent asked to propose again.
@@ -244,25 +245,3 @@ Gateway client · `agents/<role>/AGENT.md` the prompts, `agents/policy/` the gro
 `executor/` the two executor configs · `data/acme/` the sample month · `validation/` the eleven
 adversarial tests · `tests/unit/` · `scripts/` stack, demo, live checks and rehearsal ·
 `templates/` the Switch Console alternative.
-
-## Built with
-
-Claude Code wrote the executors, the agents, the tests and this README from a detailed design
-document. The executor core, the Switch agent-protocol client and the gates predate the
-hackathon as a library for temporary access grants. Built inside the window: the Mattermost
-setup, the bridged rooms and the bootstrap, the ledger and its sheet and workbook sources, the
-five agents and their stand-ins, the seven gates of the three chains, the reporting rail and
-the Switch components around a room. `scripts/spike.py` re-runs the live Switch checks and
-`scripts/rehearse.py` plays either chain through the Mattermost API.
-
-## Roadmap (not built) and limitations
-
-The rest of the chain on the same engine: the forecast commit and the pipeline review for
-sales, the product agent (concept, build and launch gates), the people agent (hiring against
-the headcount plan), line-by-line decisions, delegation while away · Microsoft Graph
-for editing an Excel file in place · Slack and Teams through the same Gateway. Approval is as
-strong as the approver's Switch account. The server owner can change an executor's addressing
-or delete it. Expiry and retries run only while the executors run. No rate limiting on commands.
-
-Built for Flip the Switch, Track 01. *Sindarin* is the Elvish of the Doors of Durin: a gate that
-opens only when the right person speaks.

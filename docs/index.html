@@ -1,0 +1,957 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Sindarin</title>
+<meta name="description" content="Agents propose, verified people approve, deterministic executors act. A finance management workflow built on Switch.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Instrument+Serif:ital@0;1&display=swap">
+<script src="https://cdn.tailwindcss.com/3.4.17"></script>
+<script>
+  tailwind.config = {
+    theme: {
+      extend: {
+        fontFamily: {
+          sans: ['Inter', 'ui-sans-serif', 'system-ui', 'Helvetica Neue', 'Arial', 'sans-serif'],
+          serif: ['"Instrument Serif"', 'Georgia', 'Times New Roman', 'serif'],
+          mono: ['ui-monospace', 'SFMono-Regular', 'Menlo', 'Consolas', 'monospace'],
+        },
+      },
+    },
+  };
+</script>
+<style>
+  :root { color-scheme: dark; }
+  html { scroll-behavior: smooth; background: #000; }
+  body { margin: 0; background: #000; color: #fff; font-family: Inter, ui-sans-serif, system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
+  @keyframes marquee { from { transform: translateX(0); } to { transform: translateX(-25%); } }
+  @media (prefers-reduced-motion: reduce) {
+    html { scroll-behavior: auto; }
+    .animate-\[marquee_30s_linear_infinite\] { animation: none !important; }
+  }
+  .mask-fade { -webkit-mask-image: linear-gradient(to right, transparent, black 12%, black 88%, transparent); mask-image: linear-gradient(to right, transparent, black 12%, black 88%, transparent); }
+  video { background: #000; }
+  ::selection { background: rgba(255,255,255,0.25); }
+  .scroll-x { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .scroll-x::-webkit-scrollbar { height: 6px; }
+  .scroll-x::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 999px; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@babel/standalone@7.24.7/babel.min.js"></script>
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useRef } = React;
+
+const REPO = "https://github.com/kartikangiras/sindarin";
+const VIDEO = {
+  hero: ["https://cdn.sceneai.art/Hero%20Section%20Video/50b4f304-cdca-4e12-8735-580d225834be.mp4", "media/hero.mp4"],
+  chat: ["https://cdn.sceneai.art/Hero%20Section%20Video/1bcc8fa3-37f6-4c53-8591-0347e4c7f8ac.mp4", "media/chat.mp4"],
+  data: ["https://cdn.sceneai.art/Hero%20Section%20Video/736fd4a0-70ac-4f44-9633-55769ead6aca.mp4", "media/data.mp4"],
+};
+
+const reduceMotion = () => window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+function scrollTo(id) {
+  const el = document.getElementById(id);
+  if (el) el.scrollIntoView({ behavior: reduceMotion() ? "auto" : "smooth", block: "start" });
+}
+
+/* ---------- primitives ---------- */
+
+function FadeInUp({ children, className = "", delay = 0 }) {
+  const ref = useRef(null);
+  const [shown, setShown] = useState(false);
+  useEffect(() => {
+    if (reduceMotion() || !("IntersectionObserver" in window)) { setShown(true); return; }
+    const el = ref.current;
+    const io = new IntersectionObserver((entries) => {
+      entries.forEach((e) => { if (e.isIntersecting) { setShown(true); io.disconnect(); } });
+    }, { threshold: 0.1 });
+    io.observe(el);
+    return () => io.disconnect();
+  }, []);
+  return (
+    <div ref={ref} style={{ transitionDelay: `${delay}ms` }}
+      className={`transition-all duration-1000 ease-out ${shown ? "opacity-100 translate-y-0" : "opacity-0 translate-y-10"} ${className}`}>
+      {children}
+    </div>
+  );
+}
+
+function Video({ sources, className = "" }) {
+  return (
+    <video autoPlay muted loop playsInline preload="metadata" aria-hidden="true" className={className}>
+      {sources.map((s) => <source key={s} src={s} type="video/mp4" />)}
+    </video>
+  );
+}
+
+function Logo({ className = "w-7 h-7" }) {
+  // a doorway with a bar across it: the gate that opens only when the right person speaks
+  return (
+    <svg viewBox="0 0 32 32" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" className={className} aria-hidden="true">
+      <path d="M7 29V15a9 9 0 0 1 18 0v14" />
+      <path d="M4 29h24" />
+      <path d="M11 29V17a5 5 0 0 1 10 0v12" />
+      <path d="M8 20h16" />
+    </svg>
+  );
+}
+
+function SwitchLogo({ className = "h-6 w-auto" }) {
+  // the Switch wordmark as published on switchagents.ai; fills follow the text color
+  return (
+    <svg viewBox="0 0 624 102" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Switch" className={className}><g><path d="M440.939 88.8155C438.963 88.8155 437.361 87.2135 437.361 85.2374V20.5918C437.361 18.6157 438.963 17.0137 440.939 17.0137H446.707C448.684 17.0137 450.286 18.6157 450.286 20.5918V43.2568C450.286 43.5825 450.394 43.899 450.593 44.1566C451.281 45.0458 452.686 44.8668 453.263 43.9016C454.463 41.8954 456 40.2839 457.876 39.0671C460.406 37.3575 463.518 36.5027 467.21 36.5027C472.271 36.5027 476.442 38.1439 479.724 41.4263C483.075 44.7087 484.751 49.8374 484.751 56.8124V85.2374C484.751 87.2135 483.149 88.8155 481.172 88.8155H475.404C473.428 88.8155 471.826 87.2135 471.826 85.2374V59.8896C471.826 56.2654 470.937 53.4275 469.159 51.376C467.45 49.2561 464.954 48.1962 461.671 48.1962C457.91 48.1962 455.072 49.4955 453.158 52.094C451.243 54.6242 450.286 58.0433 450.286 62.3514V85.2374C450.286 87.2135 448.684 88.8155 446.707 88.8155H440.939Z" fill="currentColor"></path><path d="M402.788 90.2508C397.796 90.2508 393.283 89.2592 389.249 87.2761C385.214 85.2246 382 82.2842 379.607 78.4548C377.282 74.5569 376.119 69.8727 376.119 64.4021V63.1712C376.119 57.7006 377.316 52.9822 379.709 49.016C382.103 44.9814 385.317 41.9042 389.351 39.7843C393.386 37.5961 397.865 36.502 402.788 36.502C409.9 36.502 415.679 38.3483 420.123 42.041C423.743 45.048 426.252 48.8259 427.649 53.3747C428.2 55.1673 427.026 56.9692 425.21 57.4378L419.609 58.8835C417.535 59.4187 415.5 57.9814 414.601 56.0375C413.936 54.6008 413.008 53.2861 411.815 52.0932C409.627 49.905 406.549 48.8108 402.583 48.8108C398.891 48.8108 395.711 50.1101 393.044 52.7087C390.377 55.3072 389.043 58.8973 389.043 63.4789V64.0944C389.043 68.676 390.377 72.1294 393.044 74.4544C395.711 76.7794 398.891 77.9419 402.583 77.9419C406.549 77.9419 409.558 76.9503 411.61 74.9672C412.893 73.7668 413.901 72.3159 414.632 70.6144C415.449 68.7172 417.408 67.3902 419.411 67.8911L425.18 69.3332C427.009 69.7905 428.197 71.5999 427.645 73.4031C426.256 77.9407 423.783 81.7103 420.226 84.7118C415.849 88.4044 410.037 90.2508 402.788 90.2508Z" fill="currentColor"></path><path d="M346.728 88.8155C344.403 88.8155 342.488 88.0633 340.983 86.5589C339.547 85.0545 338.829 83.1398 338.829 80.8148V53.8258C338.829 51.8497 337.227 50.2477 335.251 50.2477H327.329C325.353 50.2477 323.751 48.6457 323.751 46.6695V41.5169C323.751 39.5408 325.353 37.9388 327.329 37.9388H335.251C337.227 37.9388 338.829 36.3368 338.829 34.3606V20.5918C338.829 18.6157 340.431 17.0137 342.408 17.0137H348.176C350.152 17.0137 351.754 18.6157 351.754 20.5918V34.3606C351.754 36.3368 353.356 37.9388 355.332 37.9388H366.536C368.512 37.9388 370.114 39.5408 370.114 41.517V46.6695C370.114 48.6457 368.512 50.2477 366.536 50.2477H355.332C353.356 50.2477 351.754 51.8497 351.754 53.8258V73.4294C351.754 75.4809 352.677 76.5066 354.523 76.5066H364.69C366.666 76.5066 368.268 78.1086 368.268 80.0848V85.2374C368.268 87.2135 366.666 88.8155 364.69 88.8155H346.728Z" fill="currentColor"></path><path d="M305.452 32.6024C302.785 32.6024 300.495 31.6792 298.58 29.8329C296.665 27.9181 295.708 25.5931 295.708 22.8578C295.708 20.1225 296.665 17.8317 298.58 15.9854C300.495 14.0706 302.785 13.1133 305.452 13.1133C308.119 13.1133 310.41 14.0706 312.325 15.9854C314.24 17.8317 315.197 20.1225 315.197 22.8578C315.197 25.5931 314.24 27.9181 312.325 29.8329C310.41 31.6792 308.119 32.6024 305.452 32.6024ZM285.439 88.813C283.462 88.813 281.86 87.2109 281.86 85.2348V80.0822C281.86 78.1061 283.462 76.5041 285.439 76.5041H295.515C297.491 76.5041 299.093 74.9021 299.093 72.9259V53.8233C299.093 51.8471 297.491 50.2451 295.515 50.2451H286.669C284.693 50.2451 283.091 48.6431 283.091 46.6669V41.5144C283.091 39.5382 284.693 37.9362 286.669 37.9362H308.439C310.415 37.9362 312.017 39.5382 312.017 41.5144V72.9259C312.017 74.9021 313.619 76.5041 315.595 76.5041H323.21C325.186 76.5041 326.788 78.1061 326.788 80.0822V85.2348C326.788 87.211 325.186 88.813 323.21 88.813H285.439Z" fill="currentColor"></path><path d="M221.646 88.8142C219.762 88.8142 218.201 87.3534 218.076 85.4736L215.167 41.7532C215.029 39.6881 216.667 37.9375 218.737 37.9375H223.437C225.332 37.9375 226.898 39.4149 227.009 41.3067L229.068 76.5054V76.658C229.068 77.3378 229.619 77.8889 230.299 77.8889C230.979 77.8889 231.53 77.3378 231.53 76.658V76.5054L233.872 41.2783C233.997 39.3984 235.558 37.9375 237.442 37.9375H252.081C253.966 37.9375 255.527 39.3984 255.652 41.2783L257.994 76.5054V76.658C257.994 77.3378 258.545 77.8889 259.225 77.8889C259.905 77.8889 260.456 77.3378 260.456 76.658V76.5054L262.515 41.3067C262.626 39.4149 264.192 37.9375 266.087 37.9375H270.787C272.857 37.9375 274.495 39.6881 274.357 41.7532L271.448 85.4736C271.323 87.3534 269.762 88.8142 267.878 88.8142H252.187C250.313 88.8142 248.757 87.3697 248.618 85.5018L245.993 50.2464V45.3228C245.993 44.643 245.442 44.0919 244.762 44.0919C244.082 44.0919 243.531 44.643 243.531 45.3228V50.2464L240.906 85.5018C240.767 87.3697 239.21 88.8142 237.337 88.8142H221.646Z" fill="currentColor"></path><path d="M181.454 90.2501C175.163 90.2501 169.863 89.1218 165.555 86.8652C161.315 84.5401 158.101 81.3945 155.913 77.4283C153.793 73.4621 152.733 68.9831 152.733 63.9911C152.733 62.2916 154.111 60.9139 155.811 60.9139H163.811C165.171 60.9139 166.273 62.0161 166.273 63.3757C166.273 67.6838 167.538 71.1371 170.068 73.7357C172.599 76.2658 176.462 77.5309 181.659 77.5309C185.762 77.5309 188.805 76.6419 190.788 74.864C192.771 73.086 193.763 70.9662 193.763 68.5044C193.763 66.9316 193.387 65.4956 192.635 64.1963C191.883 62.8286 190.515 61.6661 188.532 60.7088C186.549 59.683 183.711 58.8624 180.018 58.247C175.231 57.4264 170.957 56.2297 167.196 54.6569C163.504 53.0841 160.563 50.8958 158.375 48.0922C156.255 45.2201 155.195 41.4248 155.195 36.7064V36.091C155.195 32.1932 156.221 28.7057 158.272 25.6284C160.324 22.4828 163.196 20.021 166.889 18.2431C170.65 16.4651 175.026 15.5762 180.018 15.5762C185.694 15.5762 190.481 16.6019 194.378 18.6534C198.276 20.7049 201.217 23.4402 203.2 26.8593C205.251 30.2101 206.277 33.8344 206.277 37.7322V37.8467C206.277 39.8228 204.675 41.4248 202.699 41.4248H195.199C193.839 41.4248 192.737 40.3227 192.737 38.9631C192.737 36.091 191.609 33.595 189.352 31.4752C187.164 29.3553 184.053 28.2954 180.018 28.2954C176.667 28.2954 173.966 29.0134 171.915 30.4494C169.932 31.8171 168.94 33.6976 168.94 36.091C168.94 38.5528 170 40.5359 172.12 42.0403C174.308 43.5447 178.377 44.844 184.326 45.9381C191.848 47.2374 197.592 49.5282 201.559 52.8106C205.525 56.0245 207.508 60.7771 207.508 67.0684V68.2993C207.508 74.9324 205.183 80.2662 200.533 84.3008C195.883 88.267 189.523 90.2501 181.454 90.2501Z" fill="currentColor"></path><path d="M579.154 88.8155C577.178 88.8155 575.576 87.2135 575.576 85.2374V79.4694C575.576 77.4932 577.178 75.8912 579.154 75.8912H589.23C591.207 75.8912 592.809 74.2892 592.809 72.313V33.5162C592.809 31.54 591.207 29.938 589.23 29.938H579.154C577.178 29.938 575.576 28.336 575.576 26.3598V20.5918C575.576 18.6157 577.178 17.0137 579.154 17.0137H620.003C621.979 17.0137 623.581 18.6157 623.581 20.5918V26.3598C623.581 28.336 621.979 29.938 620.003 29.938H609.927C607.95 29.938 606.348 31.54 606.348 33.5162V72.313C606.348 74.2892 607.95 75.8912 609.927 75.8912H620.003C621.979 75.8912 623.581 77.4932 623.581 79.4694V85.2374C623.581 87.2135 621.979 88.8155 620.003 88.8155H579.154Z" fill="currentColor"></path><path d="M548.719 17.0137C550.375 17.0138 551.815 18.1499 552.2 19.7607L567.622 84.4062C568.158 86.6551 566.453 88.8154 564.141 88.8154H557.377C555.705 88.8154 554.257 87.6582 553.887 86.0283L551.663 76.2158C551.293 74.5861 549.845 73.4288 548.174 73.4287H529.476C527.805 73.4288 526.357 74.5861 525.987 76.2158L523.762 86.0283C523.393 87.6582 521.944 88.8154 520.273 88.8154H513.508C511.197 88.8154 509.492 86.6551 510.028 84.4062L525.45 19.7607C525.834 18.1499 527.274 17.0138 528.93 17.0137H548.719ZM538.812 30.3779C537.395 30.3779 536.167 31.3572 535.85 32.7383L530.493 56.127C529.98 58.3675 531.682 60.5037 533.98 60.5039H543.578C544.438 60.5039 545.215 60.2043 545.824 59.7119C545.875 59.6709 545.924 59.6286 545.972 59.585C546.89 58.7557 547.369 57.4655 547.068 56.1367L541.776 32.7461C541.463 31.3614 540.232 30.3781 538.812 30.3779Z" fill="currentColor"></path><path d="M24.5117 65.6279C26.997 65.6279 29.0117 67.6426 29.0117 70.1279V77.1279C29.0117 79.6132 26.997 81.6279 24.5117 81.6279C22.0264 81.6279 20.0117 79.6132 20.0117 77.1279V70.1279C20.0117 67.6426 22.0264 65.6279 24.5117 65.6279Z" fill="currentColor"></path><path d="M42.5117 65.6279C44.997 65.6279 47.0117 67.6426 47.0117 70.1279V77.1279C47.0117 79.6132 44.997 81.6279 42.5117 81.6279C40.0264 81.6279 38.0117 79.6132 38.0117 77.1279V70.1279C38.0117 67.6426 40.0264 65.6279 42.5117 65.6279Z" fill="currentColor"></path><path d="M59.3174 20.1826C61.8027 20.1826 63.8174 22.1973 63.8174 24.6826V31.6826C63.8174 34.1679 61.8027 36.1826 59.3174 36.1826C56.8321 36.1826 54.8174 34.1679 54.8174 31.6826V24.6826C54.8174 22.1973 56.8321 20.1826 59.3174 20.1826Z" fill="currentColor"></path><path d="M77.3174 20.1826C79.8027 20.1826 81.8174 22.1973 81.8174 24.6826V31.6826C81.8174 34.1679 79.8027 36.1826 77.3174 36.1826C74.8321 36.1826 72.8174 34.1679 72.8174 31.6826V24.6826C72.8174 22.1973 74.8321 20.1826 77.3174 20.1826Z" fill="currentColor"></path><path fillRule="evenodd" clipRule="evenodd" d="M89.8232 0C96.4507 0 101.823 5.37258 101.823 12V74.2256C101.823 77.4082 100.559 80.4605 98.3086 82.7109L82.7109 98.3086C80.4605 100.559 77.4082 101.823 74.2256 101.823H12C5.37259 101.823 0 96.4507 0 89.8232V27.5977C0 24.4151 1.26425 21.3627 3.51465 19.1123L19.1123 3.51465C21.3627 1.26425 24.4151 0 27.5977 0H89.8232ZM16 56.4121C13.2386 56.4121 11 58.6507 11 61.4121V84.8232C11 88.1369 13.6863 90.8232 17 90.8232H69.6689C72.8515 90.8232 75.9039 89.559 78.1543 87.3086L87.3086 78.1543C89.559 75.9039 90.8232 72.8515 90.8232 69.6689V61.4121C90.8232 58.6507 88.5847 56.4121 85.8232 56.4121H16ZM32.1543 11C28.9717 11 25.9194 12.2642 23.6689 14.5146L14.5146 23.6689C12.2643 25.9194 11 28.9717 11 32.1543V40.4121C11 43.1735 13.2386 45.4121 16 45.4121H85.8232C88.5847 45.4121 90.8232 43.1735 90.8232 40.4121V17C90.8232 13.6863 88.1369 11 84.8232 11H32.1543Z" fill="currentColor"></path></g></svg>
+  );
+}
+
+function Badge({ children, color = "text-gray-300" }) {
+  return (
+    <span className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-white/5 border border-white/10 text-xs font-medium ${color} backdrop-blur-sm`}>
+      {children}
+    </span>
+  );
+}
+
+function PrimaryButton({ href, onClick, children }) {
+  return (
+    <a href={href} onClick={onClick} target={href && href.startsWith("http") ? "_blank" : undefined} rel="noopener"
+      className="inline-flex items-center justify-center bg-white text-black text-sm font-medium px-5 py-2.5 rounded-full hover:bg-gray-200 transition-colors">
+      {children}
+    </a>
+  );
+}
+
+function SecondaryButton({ href, onClick, children }) {
+  return (
+    <a href={href} onClick={onClick} target={href && href.startsWith("http") ? "_blank" : undefined} rel="noopener"
+      className="inline-flex items-center justify-center bg-[#1F1F22] hover:bg-[#2A2A2D] text-white text-sm font-medium px-5 py-2.5 rounded-full border border-white/5 transition-colors">
+      {children}
+    </a>
+  );
+}
+
+function CopyButton({ text, label = "Copy" }) {
+  const [state, setState] = useState("idle");
+  function copy() {
+    const done = (ok) => { setState(ok ? "done" : "fail"); setTimeout(() => setState("idle"), 1400); };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(() => done(true), () => done(false));
+    } else done(false);
+  }
+  return (
+    <button onClick={copy} className={`text-xs font-medium px-2.5 py-1 rounded-md border transition-colors ${state === "done" ? "border-emerald-400/40 text-emerald-300" : "border-white/10 text-gray-400 hover:text-white hover:border-white/30"}`}>
+      {state === "done" ? "Copied" : state === "fail" ? "Select it" : label}
+    </button>
+  );
+}
+
+/* ---------- nav ---------- */
+
+const NAV = [
+  ["about", "About"],
+  ["workflows", "Workflows"],
+  ["agents", "Agents"],
+  ["commands", "Commands"],
+  ["switch", "Switch"],
+  ["faq", "FAQ"],
+  ["contact", "Contact"],
+];
+
+function Nav() {
+  const [scrolled, setScrolled] = useState(false);
+  const [open, setOpen] = useState(false);
+  useEffect(() => {
+    const onScroll = () => setScrolled(window.scrollY > 20);
+    onScroll();
+    window.addEventListener("scroll", onScroll, { passive: true });
+    return () => window.removeEventListener("scroll", onScroll);
+  }, []);
+  const go = (id) => (e) => { e.preventDefault(); setOpen(false); scrollTo(id); };
+  return (
+    <header className={`fixed top-0 inset-x-0 z-50 transition-colors duration-300 ${scrolled || open ? "bg-black/80 backdrop-blur-md border-b border-white/5" : "bg-transparent"}`}
+      style={{ paddingTop: "env(safe-area-inset-top, 0px)" }}>
+      <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
+        <a href="#about" onClick={go("about")} className="flex items-center gap-2.5 text-white">
+          <Logo />
+          <span className="font-semibold tracking-tight">Sindarin</span>
+          <span className="text-gray-600 text-sm px-1">×</span>
+          <SwitchLogo className="h-4 w-auto text-gray-300" />
+        </a>
+        <nav className="hidden md:flex items-center gap-8">
+          {NAV.map(([id, label]) => (
+            <a key={id} href={`#${id}`} onClick={go(id)} className="text-sm font-medium text-gray-300 hover:text-white transition-colors">{label}</a>
+          ))}
+        </nav>
+        <div className="hidden md:flex items-center gap-3">
+          <a href={REPO} target="_blank" rel="noopener" className="text-sm font-medium text-gray-300 hover:text-white transition-colors">GitHub</a>
+          <SecondaryButton href="#run" onClick={go("run")}>Get started</SecondaryButton>
+        </div>
+        <button onClick={() => setOpen(!open)} aria-expanded={open} aria-label="Menu" className="md:hidden p-2 text-gray-300 hover:text-white">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+            {open ? <path d="M6 6l12 12M18 6L6 18" /> : <path d="M4 7h16M4 12h16M4 17h16" />}
+          </svg>
+        </button>
+      </div>
+      <div className={`md:hidden overflow-hidden transition-all duration-300 ${open ? "max-h-96 border-t border-white/5" : "max-h-0"}`}>
+        <div className="px-6 py-4 flex flex-col gap-1">
+          {[...NAV, ["run", "Get started"]].map(([id, label]) => (
+            <a key={id} href={`#${id}`} onClick={go(id)} className="py-2.5 text-sm font-medium text-gray-300 hover:text-white border-b border-white/5 last:border-0">{label}</a>
+          ))}
+          <a href={REPO} target="_blank" rel="noopener" className="py-2.5 text-sm font-medium text-gray-300 hover:text-white">GitHub</a>
+        </div>
+      </div>
+    </header>
+  );
+}
+
+/* ---------- hero ---------- */
+
+const STACK = [
+  ["Switch", null],
+  ["Mattermost", "M12.081 0C7.048-.034 2.339 3.125.637 8.153c-2.125 6.276 1.24 13.086 7.516 15.21 6.276 2.125 13.086-1.24 15.21-7.516 1.727-5.1-.172-10.552-4.311-13.557l.126 2.547c2.065 2.282 2.88 5.512 1.852 8.549-1.534 4.532-6.594 6.915-11.3 5.321-4.708-1.593-7.28-6.559-5.745-11.092 1.031-3.046 3.655-5.121 6.694-5.67l1.642-1.94A4.87 4.87 0 0 0 12.08 0zm3.528 1.094a.284.284 0 0 0-.123.024l-.004.001a.33.33 0 0 0-.109.071c-.145.142-.657.828-.657.828L13.6 3.4l-1.3 1.585-2.232 2.776s-1.024 1.278-.798 2.851c.226 1.574 1.396 2.34 2.304 2.648.907.307 2.302.408 3.438-.704 1.135-1.112 1.098-2.75 1.098-2.75l-.087-3.56-.07-2.05-.047-1.775s.01-.856-.02-1.057a.33.33 0 0 0-.035-.107l-.006-.012-.007-.011a.277.277 0 0 0-.229-.14z"],
+  ["Slack", "M5.042 15.165a2.528 2.528 0 0 1-2.52 2.523A2.528 2.528 0 0 1 0 15.165a2.527 2.527 0 0 1 2.522-2.52h2.52v2.52zM6.313 15.165a2.527 2.527 0 0 1 2.521-2.52 2.527 2.527 0 0 1 2.521 2.52v6.313A2.528 2.528 0 0 1 8.834 24a2.528 2.528 0 0 1-2.521-2.522v-6.313zM8.834 5.042a2.528 2.528 0 0 1-2.521-2.52A2.528 2.528 0 0 1 8.834 0a2.528 2.528 0 0 1 2.521 2.522v2.52H8.834zM8.834 6.313a2.528 2.528 0 0 1 2.521 2.521 2.528 2.528 0 0 1-2.521 2.521H2.522A2.528 2.528 0 0 1 0 8.834a2.528 2.528 0 0 1 2.522-2.521h6.312zM18.956 8.834a2.528 2.528 0 0 1 2.522-2.521A2.528 2.528 0 0 1 24 8.834a2.528 2.528 0 0 1-2.522 2.521h-2.522V8.834zM17.688 8.834a2.528 2.528 0 0 1-2.523 2.521 2.527 2.527 0 0 1-2.52-2.521V2.522A2.527 2.527 0 0 1 15.165 0a2.528 2.528 0 0 1 2.523 2.522v6.312zM15.165 18.956a2.528 2.528 0 0 1 2.523 2.522A2.528 2.528 0 0 1 15.165 24a2.527 2.527 0 0 1-2.52-2.522v-2.522h2.52zM15.165 17.688a2.527 2.527 0 0 1-2.52-2.523 2.526 2.526 0 0 1 2.52-2.52h6.313A2.527 2.527 0 0 1 24 15.165a2.528 2.528 0 0 1-2.522 2.523h-6.313z"],
+  ["Anthropic", "M17.3041 3.541h-3.6718l6.696 16.918H24Zm-10.6082 0L0 20.459h3.7442l1.3693-3.5527h7.0052l1.3693 3.5528h3.7442L10.5363 3.5409Zm-.3712 10.2232 2.2914-5.9456 2.2914 5.9456Z"],
+  ["Python", "M14.25.18l.9.2.73.26.59.3.45.32.34.34.25.34.16.33.1.3.04.26.02.2-.01.13V8.5l-.05.63-.13.55-.21.46-.26.38-.3.31-.33.25-.35.19-.35.14-.33.1-.3.07-.26.04-.21.02H8.77l-.69.05-.59.14-.5.22-.41.27-.33.32-.27.35-.2.36-.15.37-.1.35-.07.32-.04.27-.02.21v3.06H3.17l-.21-.03-.28-.07-.32-.12-.35-.18-.36-.26-.36-.36-.35-.46-.32-.59-.28-.73-.21-.88-.14-1.05-.05-1.23.06-1.22.16-1.04.24-.87.32-.71.36-.57.4-.44.42-.33.42-.24.4-.16.36-.1.32-.05.24-.01h.16l.06.01h8.16v-.83H6.18l-.01-2.75-.02-.37.05-.34.11-.31.17-.28.25-.26.31-.23.38-.2.44-.18.51-.15.58-.12.64-.1.71-.06.77-.04.84-.02 1.27.05zm-6.3 1.98l-.23.33-.08.41.08.41.23.34.33.22.41.09.41-.09.33-.22.23-.34.08-.41-.08-.41-.23-.33-.33-.22-.41-.09-.41.09zm13.09 3.95l.28.06.32.12.35.18.36.27.36.35.35.47.32.59.28.73.21.88.14 1.04.05 1.23-.06 1.23-.16 1.04-.24.86-.32.71-.36.57-.4.45-.42.33-.42.24-.4.16-.36.09-.32.05-.24.02-.16-.01h-8.22v.82h5.84l.01 2.76.02.36-.05.34-.11.31-.17.29-.25.25-.31.24-.38.2-.44.17-.51.15-.58.13-.64.09-.71.07-.77.04-.84.01-1.27-.04-1.07-.14-.9-.2-.73-.25-.59-.3-.45-.33-.34-.34-.25-.34-.16-.33-.1-.3-.04-.25-.02-.2.01-.13v-5.34l.05-.64.13-.54.21-.46.26-.38.3-.32.33-.24.35-.2.35-.14.33-.1.3-.06.26-.04.21-.02.13-.01h5.84l.69-.05.59-.14.5-.21.41-.28.33-.32.27-.35.2-.36.15-.36.1-.35.07-.32.04-.28.02-.21V6.07h2.09l.14.01zm-6.47 14.25l-.23.33-.08.41.08.41.23.33.33.23.41.08.41-.08.33-.23.23-.33.08-.41-.08-.41-.23-.33-.33-.23-.41-.08-.41.08z"],
+  ["SQLite", "M21.678.521c-1.032-.92-2.28-.55-3.513.544a8.71 8.71 0 0 0-.547.535c-2.109 2.237-4.066 6.38-4.674 9.544.237.48.422 1.093.544 1.561a13.044 13.044 0 0 1 .164.703s-.019-.071-.096-.296l-.05-.146a1.689 1.689 0 0 0-.033-.08c-.138-.32-.518-.995-.686-1.289-.143.423-.27.818-.376 1.176.484.884.778 2.4.778 2.4s-.025-.099-.147-.442c-.107-.303-.644-1.244-.772-1.464-.217.804-.304 1.346-.226 1.478.152.256.296.698.422 1.186.286 1.1.485 2.44.485 2.44l.017.224a22.41 22.41 0 0 0 .056 2.748c.095 1.146.273 2.13.5 2.657l.155-.084c-.334-1.038-.47-2.399-.41-3.967.09-2.398.642-5.29 1.661-8.304 1.723-4.55 4.113-8.201 6.3-9.945-1.993 1.8-4.692 7.63-5.5 9.788-.904 2.416-1.545 4.684-1.931 6.857.666-2.037 2.821-2.912 2.821-2.912s1.057-1.304 2.292-3.166c-.74.169-1.955.458-2.362.629-.6.251-.762.337-.762.337s1.945-1.184 3.613-1.72C21.695 7.9 24.195 2.767 21.678.521m-18.573.543A1.842 1.842 0 0 0 1.27 2.9v16.608a1.84 1.84 0 0 0 1.835 1.834h9.418a22.953 22.953 0 0 1-.052-2.707c-.006-.062-.011-.141-.016-.2a27.01 27.01 0 0 0-.473-2.378c-.121-.47-.275-.898-.369-1.057-.116-.197-.098-.31-.097-.432 0-.12.015-.245.037-.386a9.98 9.98 0 0 1 .234-1.045l.217-.028c-.017-.035-.014-.065-.031-.097l-.041-.381a32.8 32.8 0 0 1 .382-1.194l.2-.019c-.008-.016-.01-.038-.018-.053l-.043-.316c.63-3.28 2.587-7.443 4.8-9.791.066-.069.133-.128.198-.194Z"],
+  ["Google Sheets", "M11.318 12.545H7.91v-1.909h3.41v1.91zM14.728 0v6h6l-6-6zm1.363 10.636h-3.41v1.91h3.41v-1.91zm0 3.273h-3.41v1.91h3.41v-1.91zM20.727 6.5v15.864c0 .904-.732 1.636-1.636 1.636H4.909a1.636 1.636 0 0 1-1.636-1.636V1.636C3.273.732 4.005 0 4.909 0h9.318v6.5h6.5zm-3.273 2.773H6.545v7.909h10.91v-7.91zm-6.136 4.636H7.91v1.91h3.41v-1.91z"],
+  ["Docker", "M13.983 11.078h2.119a.186.186 0 00.186-.185V9.006a.186.186 0 00-.186-.186h-2.119a.185.185 0 00-.185.185v1.888c0 .102.083.185.185.185m-2.954-5.43h2.118a.186.186 0 00.186-.186V3.574a.186.186 0 00-.186-.185h-2.118a.185.185 0 00-.185.185v1.888c0 .102.082.185.185.185m0 2.716h2.118a.187.187 0 00.186-.186V6.29a.186.186 0 00-.186-.185h-2.118a.185.185 0 00-.185.185v1.887c0 .102.082.185.185.186m-2.93 0h2.12a.186.186 0 00.184-.186V6.29a.185.185 0 00-.185-.185H8.1a.185.185 0 00-.185.185v1.887c0 .102.083.185.185.186m-2.964 0h2.119a.186.186 0 00.185-.186V6.29a.185.185 0 00-.185-.185H5.136a.186.186 0 00-.186.185v1.887c0 .102.084.185.186.186m5.893 2.715h2.118a.186.186 0 00.186-.185V9.006a.186.186 0 00-.186-.186h-2.118a.185.185 0 00-.185.185v1.888c0 .102.082.185.185.185m-2.93 0h2.12a.185.185 0 00.184-.185V9.006a.185.185 0 00-.184-.186h-2.12a.185.185 0 00-.184.185v1.888c0 .102.083.185.185.185m-2.964 0h2.119a.185.185 0 00.185-.185V9.006a.185.185 0 00-.184-.186h-2.12a.186.186 0 00-.186.186v1.887c0 .102.084.185.186.185m-2.92 0h2.12a.185.185 0 00.184-.185V9.006a.185.185 0 00-.184-.186h-2.12a.185.185 0 00-.184.185v1.888c0 .102.082.185.185.185M23.763 9.89c-.065-.051-.672-.51-1.954-.51-.338.001-.676.03-1.01.087-.248-1.7-1.653-2.53-1.716-2.566l-.344-.199-.226.327c-.284.438-.49.922-.612 1.43-.23.97-.09 1.882.403 2.661-.595.332-1.55.413-1.744.42H.751a.751.751 0 00-.75.748 11.376 11.376 0 00.692 4.062c.545 1.428 1.355 2.48 2.41 3.124 1.18.723 3.1 1.137 5.275 1.137.983.003 1.963-.086 2.93-.266a12.248 12.248 0 003.823-1.389c.98-.567 1.86-1.288 2.61-2.136 1.252-1.418 1.998-2.997 2.553-4.4h.221c1.372 0 2.215-.549 2.68-1.009.309-.293.55-.65.707-1.046l.098-.288Z"],
+  ["GitHub", "M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"],
+];
+
+function Marquee() {
+  const items = [...STACK, ...STACK, ...STACK, ...STACK];
+  return (
+    <div className="mt-24 w-full">
+      <p className="text-sm text-gray-500 font-medium mb-8 text-center">Built on</p>
+      <div className="overflow-hidden mask-fade">
+        <div className="flex w-max animate-[marquee_30s_linear_infinite]">
+          {items.map(([name, d], i) => (
+            <div key={i} className="flex-shrink-0 px-8 flex items-center gap-2.5 text-gray-400">
+              {d ? (
+                <React.Fragment>
+                  <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d={d} /></svg>
+                  <span className="text-sm font-medium">{name}</span>
+                </React.Fragment>
+              ) : (
+                <SwitchLogo className="h-[18px] w-auto" />
+              )}
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Hero() {
+  const go = (id) => (e) => { e.preventDefault(); scrollTo(id); };
+  return (
+    <section id="about" className="min-h-screen flex flex-col items-center justify-center pt-32 pb-20 relative z-0 px-6">
+      <Video sources={VIDEO.hero} className="absolute inset-0 -z-10 w-full h-full object-cover min-w-full min-h-full opacity-90" />
+      <div className="absolute inset-0 -z-10 bg-gradient-to-b from-black/30 via-transparent to-black" />
+      <FadeInUp className="flex flex-col items-center text-center">
+        <h1 className="text-5xl md:text-7xl font-medium tracking-tight mb-6 text-center max-w-4xl">
+          Corporate finance workflows,<br />run from your <span className="font-serif italic font-normal">chat.</span>
+        </h1>
+        <p className="text-[16px] text-gray-400 max-w-2xl text-center">
+          Sindarin runs a company's finance management inside Switch: the monthly plan, the month-end close and the sales deals. Agents draft every step from the books, the right people approve by Switch identity, deterministic executors move the ledger, and the team's own Google Sheet or Excel file is the record.
+        </p>
+        <div className="flex flex-wrap items-center justify-center gap-3 mt-8">
+          <PrimaryButton href="#run" onClick={go("run")}>Run it in ten minutes</PrimaryButton>
+          <SecondaryButton href={REPO}>View on GitHub</SecondaryButton>
+        </div>
+      </FadeInUp>
+      <FadeInUp delay={200} className="w-full max-w-7xl"><Marquee /></FadeInUp>
+    </section>
+  );
+}
+
+/* ---------- feature sections ---------- */
+
+function Mockup({ video, children }) {
+  return (
+    <div className="rounded-3xl overflow-hidden p-8 border border-white/10 relative min-h-[420px] flex items-center">
+      <Video sources={video} className="absolute inset-0 object-cover w-full h-full" />
+      <div className="absolute inset-0 bg-black/20" />
+      <div className="relative w-full">{children}</div>
+    </div>
+  );
+}
+
+function ChatCard() {
+  return (
+    <div className="bg-[#1C1C1E]/90 backdrop-blur-xl border border-white/10 rounded-2xl p-4 text-sm font-mono space-y-3 max-w-md mx-auto">
+      <div className="flex items-center gap-2 text-xs text-gray-400 font-sans"><span className="w-2 h-2 rounded-full bg-emerald-400" />#planning</div>
+      <div><span className="text-gray-400">User</span> <span className="text-sky-300">@sindarin-ledger</span> sale S-2026-1055 3980.00 Contoso Ltd</div>
+      <div><span className="text-gray-400">sindarin-ledger</span> <span className="text-white">S-2026-1055</span> Contoso Ltd 3,980.00 USD landed in 2026-10 · revenue is now 93,885.00 USD.</div>
+      <div><span className="text-gray-400">User</span> <span className="text-sky-300">@sindarin-ledger</span> approve BUDGET-1</div>
+      <div className="text-red-300"><span className="text-gray-400">sindarin-ledger</span> <b>BUDGET-1</b> not applied — the ledger changed since the proposal (2026-10 revenue 89,905.00 USD → 93,885.00 USD).</div>
+      <div><span className="text-gray-400">planner</span> here is the November budget again, against the updated October ledger…</div>
+      <div><span className="text-gray-400">User</span> <span className="text-sky-300">@sindarin-ledger</span> approve BUDGET-1</div>
+      <div className="text-emerald-300"><span className="text-gray-400">sindarin-ledger</span> <b>BUDGET-1</b> approved by User · recorded 16,000.00 USD · 4 lines · verified at 20:01:48 UTC.</div>
+    </div>
+  );
+}
+
+function ReadCard() {
+  const rows = [
+    ["S-2026-1031", "2026-10-01", "Northwind Traders", "12,450.00"],
+    ["S-2026-1032", "2026-10-02", "Contoso Ltd", "8,600.00"],
+    ["S-2026-1041", "2026-10-27", "Wide World Importers", "3,980.00"],
+    ["S-2026-1041", "2026-10-27", "Wide World Importers", "3,980.00"],
+  ];
+  return (
+    <div className="bg-[#1C1C1E]/90 backdrop-blur-xl border border-white/10 rounded-2xl p-4 text-sm max-w-md mx-auto">
+      <div className="flex items-center gap-2 text-xs text-gray-400"><span className="w-2 h-2 rounded-full bg-sky-400" />#acme-finance · <span className="font-mono">@sindarin-switch read &lt;sheet link&gt;</span></div>
+      <div className="mt-3 font-medium">acme.xlsx <span className="text-gray-400 font-normal">· Google Sheet · 5 tabs · 8 KB</span></div>
+      <div className="mt-1 text-gray-400"><b className="text-white font-medium">sales</b> · 13 rows · 93,885.00 USD (89,905.00 USD with each invoice counted once)</div>
+      <div className="mt-3 overflow-hidden rounded-lg border border-white/10">
+        <table className="w-full text-xs font-mono">
+          <tbody>
+            {rows.map((r, i) => (
+              <tr key={i} className={`${i === 3 ? "text-amber-300" : "text-gray-300"} border-t border-white/5 first:border-0`}>
+                {r.map((c, j) => <td key={j} className="px-2 py-1.5 whitespace-nowrap">{c}</td>)}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div className="mt-3 text-amber-300 text-xs">⚠ S-2026-1041 appears 2 times (rows 12, 13); the books keep both</div>
+      <div className="mt-2 text-emerald-300 text-xs">As the books: loadable · 2026-10 · <span className="font-mono">load &lt;link&gt;</span> to sindarin-ledger takes it in.</div>
+    </div>
+  );
+}
+
+function Feature({ id, badge, badgeColor, title, text, cta, ctaId, mockup, flip = false }) {
+  const go = (e) => { e.preventDefault(); scrollTo(ctaId); };
+  return (
+    <section id={id} className="py-24 px-6 max-w-7xl mx-auto">
+      <div className="grid lg:grid-cols-2 gap-16 items-center">
+        <FadeInUp className={flip ? "lg:order-2" : ""}>
+          <div className="mb-6"><Badge color={badgeColor}>✨ {badge}</Badge></div>
+          <h2 className="text-4xl md:text-5xl font-semibold tracking-tight mb-6">{title}</h2>
+          <p className="text-gray-400 text-lg mb-8 max-w-xl">{text}</p>
+          <PrimaryButton href={`#${ctaId}`} onClick={go}>{cta}</PrimaryButton>
+        </FadeInUp>
+        <FadeInUp delay={150} className={flip ? "lg:order-1" : ""}>{mockup}</FadeInUp>
+      </div>
+    </section>
+  );
+}
+
+/* ---------- workflows ---------- */
+
+const CHAINS = [
+  {
+    name: "Plan the month",
+    ask: "@analyst @planner plan November",
+    room: "#acme-finance → #planning → #plan-2026-11",
+    limit: "Budget limit 10,000.00 USD: the CFO alone below it, the board above",
+    steps: [
+      ["GOALS", "cfo", "@sindarin-switch approve GOALS-1", "opens the plan room with the brief"],
+      ["BUDGET", "board · cfo under the limit", "@sindarin-ledger approve BUDGET-1", "recorded under the cap"],
+      ["ENTRIES", "controllers", "@sindarin-ledger approve ENTRIES-1", "register entries posted, period planned"],
+    ],
+    moment: "A sale typed in chat between the budget proposal and its approval gets the approval refused with both revenues, the snapshot replaced and the planner asked again.",
+  },
+  {
+    name: "Close the month",
+    ask: "@analyst @bookkeeper close October",
+    room: "#acme-finance → #payments → #close-2026-10",
+    limit: "Payment limit 10,000.00 USD: controllers below it, the CFO above",
+    steps: [
+      ["CLOSE", "controllers", "@sindarin-switch approve CLOSE-1", "opens the period room"],
+      ["PAY", "cfo · controllers under the limit", "@sindarin-ledger approve PAY-1", "payables paid, verified by read-back"],
+      ["LOCK", "controllers", "@sindarin-ledger approve LOCK-1", "entries posted, debits equal credits, period locked"],
+    ],
+    moment: "A payable amended under a pending run refuses the stale approval with both amounts. A run naming an invoice outside the approved plan is refused before anyone is asked.",
+  },
+  {
+    name: "Win a deal",
+    ask: "@sales deal Contoso Ltd on Team at 10,200.00",
+    room: "#sales → #acme-finance is told once",
+    limit: "Discount limit 1,000.00 USD: controllers below it, the CFO above",
+    steps: [
+      ["DEAL", "cfo · controllers under the discount limit", "@sindarin-ledger approve DEAL-1", "deal won, the sale lands in the open month"],
+      ["price", "any person", "@sindarin-ledger price Team 12500.00", "moves the list price under a pending deal"],
+      ["chart", "anyone", "@sindarin-switch chart 2026-11 deals", "the month's deals as a PNG in the room"],
+    ],
+    moment: "The list price comes from the ledger's price book, never from the agent. A fence that claims another list price is refused before anyone is asked; a locked month takes no deal.",
+  },
+];
+
+function Workflows() {
+  return (
+    <section id="workflows" className="py-24 px-6 max-w-7xl mx-auto">
+      <FadeInUp className="max-w-3xl mb-14">
+        <div className="mb-6"><Badge color="text-sky-300">✨ Workflows</Badge></div>
+        <h2 className="text-4xl md:text-5xl font-semibold tracking-tight mb-5">Three chains, seven gates, <span className="font-serif italic font-normal">one engine.</span></h2>
+        <p className="text-gray-400 text-lg">Every gate has the same shape: an agent proposes as a JSON fence, a named group approves in a named room, an executor acts and hands the work on with one stage line. A new chain is rules, an agent and tests on the same engine.</p>
+      </FadeInUp>
+      <div className="grid lg:grid-cols-3 gap-6">
+        {CHAINS.map((c, i) => (
+          <FadeInUp key={c.name} delay={i * 120} className="h-full">
+            <article className="h-full rounded-3xl border border-white/10 bg-white/[0.03] p-7 flex flex-col gap-5">
+              <div>
+                <div className="text-xs text-gray-500 font-medium mb-2">Chain {i + 1}</div>
+                <h3 className="text-2xl font-semibold tracking-tight">{c.name}</h3>
+              </div>
+              <div className="rounded-xl bg-black/60 border border-white/10 px-4 py-3 font-mono text-sm text-sky-200 break-words">{c.ask}</div>
+              <ul className="space-y-3">
+                {c.steps.map(([id, who, cmd, result]) => (
+                  <li key={id} className="text-sm">
+                    <div className="flex items-baseline gap-2 flex-wrap">
+                      <span className="font-mono text-white">{id}</span>
+                      <span className="text-gray-500">· approver</span>
+                      <span className="text-gray-300">{who}</span>
+                    </div>
+                    <div className="font-mono text-xs text-gray-400 mt-1 break-words">{cmd}</div>
+                    <div className="text-emerald-300/90 text-xs mt-1">→ {result}</div>
+                  </li>
+                ))}
+              </ul>
+              <div className="text-xs text-gray-500 space-y-1 mt-auto">
+                <div>{c.room}</div>
+                <div>{c.limit}</div>
+              </div>
+              <div className="rounded-xl border border-red-400/20 bg-red-400/5 px-4 py-3 text-sm text-gray-300"><span className="text-red-300 font-medium">The books moved. </span>{c.moment}</div>
+            </article>
+          </FadeInUp>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+/* ---------- agents ---------- */
+
+const AGENTS = [
+  ["@analyst", "LLM agent · #acme-finance", "Reports the month from the ledger against its targets, reads any file a person links, and tells the business when a month is planned or closed. Proposes nothing.", ["month_report", "read_file"], "cannot propose, approve or write"],
+  ["@planner", "LLM agent · #acme-finance, #planning", "Proposes the period's goals from the basis month's actuals, then the budget under the approved cap, one line per department.", ["propose_goals", "propose_budget"], "cannot record or spend"],
+  ["@bookkeeper", "LLM agent · plan and period rooms", "Proposes the register entries once a budget is recorded, the month's close plan when asked, and the lock once the payment run is paid.", ["propose_entries", "propose_close", "propose_lock"], "cannot post or lock"],
+  ["@treasury", "LLM agent · #payments", "Proposes the payment run of an approved plan from the open payables as the ledger holds them: vendor, invoice, amount, total.", ["propose_payment_run"], "cannot pay"],
+  ["@sales", "LLM agent · #sales", "Registers a deal at a price against the ledger's price book. The list price and the discount come from the tool; the asked price is the only figure it repeats.", ["propose_deal"], "cannot discount, approve or book"],
+  ["@sindarin-switch", "Executor · deterministic · Gateway credential", "Verifies approvals by participant id and opens the plan and period rooms with the brief as a Switch document. Keeps the board. Reads the ledger read-only for reports, exports, charts and linked files.", ["approve · deny · changes", "board · brief", "report · export · chart · read"], null],
+  ["@sindarin-ledger", "Executor · deterministic · the only writer of the books", "Verifies approvals by participant id; records budgets, posts entries, pays payables, locks periods and wins deals. Takes a person's late sale, a list price and the team's file into the books.", ["approve · deny · changes", "sale · price · load"], null],
+];
+
+function Agents() {
+  return (
+    <section id="agents" className="py-24 px-6 max-w-7xl mx-auto">
+      <FadeInUp className="max-w-3xl mb-14">
+        <div className="mb-6"><Badge color="text-violet-300">✨ Agents</Badge></div>
+        <h2 className="text-4xl md:text-5xl font-semibold tracking-tight mb-5">Five who draft, <span className="font-serif italic font-normal">two who act.</span></h2>
+        <p className="text-gray-400 text-lg">The LLM agents run on Claude with one or two strict tools each, behind validators that refuse anything the ledger does not back. Without a model key they run a deterministic stand-in through the same tools. The executors run no model at all.</p>
+      </FadeInUp>
+      <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-5">
+        {AGENTS.map(([handle, kind, text, tools, cannot], i) => (
+          <FadeInUp key={handle} delay={(i % 3) * 100} className="h-full">
+            <article className={`h-full rounded-2xl border p-6 flex flex-col gap-4 ${cannot ? "border-white/10 bg-white/[0.03]" : "border-white/15 bg-[#0d0d10]"}`}>
+              <div>
+                <div className="text-xs text-gray-500 mb-2">{kind}</div>
+                <div className={`font-mono text-lg ${cannot ? "text-sky-300" : "text-white"}`}>{handle}</div>
+              </div>
+              <p className="text-sm text-gray-400 leading-relaxed">{text}</p>
+              <div className="flex flex-wrap gap-2 mt-auto">
+                {tools.map((t) => <span key={t} className="text-xs font-mono px-2.5 py-1 rounded-full border border-white/10 text-gray-300">{t}</span>)}
+              </div>
+              {cannot && <div className="text-xs font-mono text-red-300/90">{cannot}</div>}
+            </article>
+          </FadeInUp>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+/* ---------- commands ---------- */
+
+const COMMANDS = [
+  {
+    title: "Asks",
+    who: "to the agents, in words",
+    cols: ["Type", "What happens", "Room"],
+    rows: [
+      ["@analyst @planner plan November", "The analyst reports the basis month; the planner proposes the goals for the month named.", "#acme-finance"],
+      ["@analyst @bookkeeper close October", "The analyst reports the month; the bookkeeper proposes the close plan.", "#acme-finance"],
+      ["@sales deal Contoso Ltd on Team at 10,200.00 net60", "A deal: account, product, price, terms (standard, net60 or sla), priced from the price book.", "#sales"],
+      ["@analyst what is in this file? <link>", "The analyst reads a linked Google Sheet, Drive file, .xlsx or .csv and describes it; name a tab to list its rows.", "#acme-finance"],
+    ],
+  },
+  {
+    title: "Gates",
+    who: "to the executor that owns the artifact",
+    cols: ["Command", "What happens", "Answered by"],
+    rows: [
+      ["approve <id>", "Checks the sender's group, the room, the TTL, single use and the live ledger, then acts and verifies. Refusals name the reason, the amount and the limit.", "switch: GOALS, CLOSE · ledger: the rest"],
+      ["deny <id> [reason]", "Closes the artifact. The proposer is told, with the reason.", "the owner"],
+      ["changes <id> <note>", "Asks the proposing agent to revise in the same thread. Approvals are cleared.", "the owner"],
+      ["status [<id>]", "One artifact, or everything the executor holds, with states and who it waits on.", "either"],
+      ["whoami", "Your Switch participant id and the groups it is in. This is the id the policy names.", "either"],
+      ["help", "The command list.", "either"],
+      ["board", "Everything in flight across both executors, and what each item waits on.", "sindarin-switch"],
+      ["brief", "Re-posts the room's opening brief, the approved goals or plan, to anyone who asks.", "sindarin-switch, in a plan or period room"],
+    ],
+  },
+  {
+    title: "The books",
+    who: "writes by a person, under their id, never gated",
+    cols: ["Command", "What happens", "Answered by"],
+    rows: [
+      ["sale <invoice> <amount> <customer>", "A late sale lands in the newest month with sales. The next approval meets the changed ledger.", "sindarin-ledger"],
+      ["price <product> <amount>", "Edits a list price in the price book, under a pending deal if you like.", "sindarin-ledger"],
+      ["load <link>", "The team's file into the books, by someone in an approver group. Open rows are replaced; paid payables and locked months are kept and named.", "sindarin-ledger"],
+    ],
+  },
+  {
+    title: "Reading",
+    who: "from any room, read-only, from the ledger",
+    cols: ["Command", "What happens", "Answered by"],
+    rows: [
+      ["report <period>", "The month against its targets, the recorded budget, the planned amounts, budget against actual once both exist.", "sindarin-switch"],
+      ["export <period> sales|payables|budget|planned|targets|deals|journal", "The table as a CSV file in the room.", "sindarin-switch"],
+      ["chart <period> revenue|budget|costs|target|deals", "A bar chart PNG in the room; a text chart where files cannot be carried.", "sindarin-switch"],
+      ["read <link> [tab]", "Any Google Sheet, Drive file, .xlsx or .csv: every tab, rows, columns, totals, date ranges, repeated invoices, missing columns, and whether the books can take it. With a tab name, its rows as a table plus the whole tab as a CSV.", "sindarin-switch"],
+    ],
+  },
+  {
+    title: "Terminal",
+    who: "for the person running the stack",
+    cols: ["Command", "What happens", ""],
+    rows: [
+      ["scripts/demo.sh", "Switch and Mattermost in Docker, the ledger, the bootstrap, the seven processes. PEOPLE=cast adds the four-person team; stop stops.", ""],
+      ["uv run sindarin bootstrap --people me|cast|both", "Registers the agents on the Gateway, creates the rooms, writes the policy with real participant ids, groups the rooms, sets the budgets.", ""],
+      ["uv run sindarin ledger import [--sheet URL | --xlsx PATH]", "Loads the books from the sample CSVs, a Google Sheet shared by link, or an Excel workbook.", ""],
+      ["uv run sindarin ledger export-xlsx acme.xlsx", "The whole ledger as a workbook, one sheet per table.", ""],
+      ["uv run sindarin ledger show | add-sale | amend | price | reset", "Read the books, or move them from the terminal the way sale and price do from chat.", ""],
+      ["scripts/dev_stack.sh start [--fake] | stop | status", "The seven processes alone; --fake runs the agents on the stand-in model.", ""],
+      ["scripts/reset_demo.sh [--rooms]", "Wipes executor state, reloads the ledger, removes the rooms a run opened.", ""],
+      ["uv run python scripts/rehearse.py --chain plan|close|sales", "Plays the four-person team through a chain against the live stack, refusals included.", ""],
+      ["uv run pytest", "186 tests, eleven of them adversarial, each writing a transcript to validation/reports/.", ""],
+      ["uv run sindarin doctor", "Says what is missing, if anything is.", ""],
+    ],
+  },
+];
+
+function Commands() {
+  const [active, setActive] = useState(0);
+  const group = COMMANDS[active];
+  return (
+    <section id="commands" className="py-24 px-6 max-w-7xl mx-auto">
+      <FadeInUp className="max-w-3xl mb-12">
+        <div className="mb-6"><Badge color="text-amber-300">✨ Commands</Badge></div>
+        <h2 className="text-4xl md:text-5xl font-semibold tracking-tight mb-5">Everything you can <span className="font-serif italic font-normal">type.</span></h2>
+        <p className="text-gray-400 text-lg">Agents answer to a mention; executors answer to a command. Ids are GOALS-n, BUDGET-n, ENTRIES-n for the plan, CLOSE-n, PAY-n, LOCK-n for the close and DEAL-n for sales. A trailing full stop changes nothing. A bare mention of an executor returns its help.</p>
+      </FadeInUp>
+      <FadeInUp>
+        <div className="flex flex-wrap gap-2 mb-6">
+          {COMMANDS.map((g, i) => (
+            <button key={g.title} onClick={() => setActive(i)}
+              className={`text-sm font-medium px-4 py-2 rounded-full border transition-colors ${i === active ? "bg-white text-black border-white" : "bg-[#1F1F22] hover:bg-[#2A2A2D] text-gray-300 border-white/5"}`}>
+              {g.title}
+            </button>
+          ))}
+        </div>
+        <div className="rounded-3xl border border-white/10 bg-white/[0.02] overflow-hidden">
+          <div className="px-6 py-4 border-b border-white/10 flex items-baseline gap-3 flex-wrap">
+            <h3 className="text-xl font-semibold">{group.title}</h3>
+            <span className="text-sm text-gray-500">{group.who}</span>
+          </div>
+          <div className="scroll-x">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-left text-xs text-gray-500 uppercase tracking-wider">
+                  {group.cols.map((c) => <th key={c} className="px-6 py-3 font-medium">{c}</th>)}
+                </tr>
+              </thead>
+              <tbody>
+                {group.rows.map(([cmd, what, who]) => (
+                  <tr key={cmd} className="border-t border-white/5 align-top">
+                    <td className="px-6 py-4 whitespace-nowrap">
+                      <code className="font-mono text-white">{cmd}</code>
+                      <span className="ml-3 inline-block align-middle"><CopyButton text={cmd} /></span>
+                    </td>
+                    <td className="px-6 py-4 text-gray-400 min-w-[260px]">{what}</td>
+                    <td className="px-6 py-4 text-gray-500 whitespace-nowrap">{who}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </FadeInUp>
+    </section>
+  );
+}
+
+/* ---------- switch, gates, tests ---------- */
+
+const SWITCH = [
+  ["Identity", "Every event carries a Switch participant id. Approver groups, proposers and executors are lists of ids in the policy. An impostor renamed \"Isaac\" gets the same refusal as the sales person."],
+  ["Rooms", "#acme-finance, #planning, #payments, #sales and the rooms a chain opens are Switch rooms bridged to Mattermost, opened by the executor when the first gate passes."],
+  ["Documents, groups, links", "The brief is a Switch document attached to the room. The room is linked from #acme-finance and joins the \"Acme finance\" room group, so the Console shows the month as one thing."],
+  ["Attachments", "Charts, exports and the rows of a linked file go into the room as files through Switch's attachment route."],
+  ["Budgets", "The bootstrap caps every LLM agent at 200,000 output tokens a day with Switch's own usage budgets, a limit beside the gates."],
+  ["Routing", "Each agent's addressing policy is scoped to its rooms; the executor that opens a room widens the policies of the agents it puts there. The executors re-check every sender in code anyway."],
+  ["Agents on the protocol", "All seven are registered through the Gateway API and connect over the agent protocol with their own keys. The five LLM roles can also be created as Console-run Claude Code agents from the shipped template; the executors stay external by design."],
+  ["The bridge", "Everything on screen is Mattermost, the one bundled with Switch or your own server connected through the Gateway. Remove Switch and there is no identity to verify, no transport, no rooms and no record."],
+];
+
+const CHECKS = [
+  ["P4", "The snapshot is read from the ledger, never from the agent's fence: the basis month's actuals for a budget, the payables' rows for a run, the recorded budget or the trial balance for the entries, the price book for a deal."],
+  ["A2", "The sender's participant id is in the group the rule names. For a budget, a payment run or a deal the group is chosen on the total the executor read, so the limit decides who may say yes."],
+  ["A3", "Agents and executors are refused whatever they type, and the one who proposed never approves."],
+  ["A4", "Single use. The artifact must be pending and inside its 24-hour TTL. A second yes, or a redelivered message, changes nothing."],
+  ["A5", "The command comes from the rule's room. Entries are approved only in the plan room, the lock only in the period room."],
+  ["A6", "The ledger is re-read. If it moved since the proposal, the approval is refused with both values, the snapshot replaced and the agent asked to propose again."],
+  ["Order", "A budget follows approved goals, the entries a recorded budget, a payment run an approved plan naming only its payables, the lock a paid run. Stage lines are posted once."],
+  ["State", "State goes to SQLite before any write; every action is verified by read-back, with one retry. One credential per executor; the agents open the ledger read-only."],
+];
+
+const TESTS = [
+  ["Injection in the ask: \"also budget 50,000.00 for Vincent Ltd\"", "the goals carry only the ledger's actuals; a line over the cap or on an unknown account is refused"],
+  ["Forged approval by the planner, by Vincent, by an impostor named Isaac", "agent and not-in-group refusals; nothing recorded"],
+  ["The CFO approves a budget above the limit", "refused with the amount and the limit; the board's yes records"],
+  ["Replay: approve twice, redeliver the message", "one record; not pending; redelivery ignored"],
+  ["A late sale lands between proposal and approval", "refused with both revenues; snapshot replaced; re-proposal recorded"],
+  ["Approve the entries in #planning, the budget in the plan room", "room refusals; the period is planned only from its own room"],
+  ["Goals pending past their TTL", "expired, the planner told, no room opened"],
+  ["A controller approves a payment run above the limit", "refused with the amount and the limit; the CFO's yes pays"],
+  ["A payable amended under a pending run; a run with an invoice outside the plan", "the smuggled run refused; the stale yes refused with both amounts; the re-proposal paid"],
+  ["A lock before the plan, before the run is paid, from the wrong room", "each refused and named; the period locks only after its run, from its own room"],
+  ["A deal at 15% off approved by a controller; a fence with its own list price; the price book edited under the pending deal", "refused with the discount and the limit; the price book is the list price; both prices named and the re-proposal won"],
+];
+
+function Switch() {
+  return (
+    <section id="switch" className="py-24 px-6 max-w-7xl mx-auto">
+      <FadeInUp className="max-w-3xl mb-14">
+        <div className="mb-6"><Badge color="text-emerald-300">✨ How Switch is used</Badge></div>
+        <h2 className="text-4xl md:text-5xl font-semibold tracking-tight mb-5">Remove Switch and nothing is left to <span className="font-serif italic font-normal">verify.</span></h2>
+        <p className="text-gray-400 text-lg">Switch is the identity every refusal is built on, the transport, the rooms and the record. Mattermost is only what the people look at.</p>
+      </FadeInUp>
+      <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-5">
+        {SWITCH.map(([t, d], i) => (
+          <FadeInUp key={t} delay={(i % 4) * 80} className="h-full">
+            <div className="h-full rounded-2xl border border-white/10 bg-white/[0.03] p-6">
+              <div className="font-medium mb-2">{t}</div>
+              <p className="text-sm text-gray-400 leading-relaxed">{d}</p>
+            </div>
+          </FadeInUp>
+        ))}
+      </div>
+      <FadeInUp className="mt-16 grid lg:grid-cols-2 gap-6">
+        <div className="rounded-3xl border border-white/10 bg-white/[0.02] p-7">
+          <h3 className="text-2xl font-semibold tracking-tight mb-2">What an approval has to pass</h3>
+          <p className="text-sm text-gray-500 mb-6">The executor core is pure code with no I/O. These run in order on every approve.</p>
+          <ul className="space-y-4">
+            {CHECKS.map(([c, d]) => (
+              <li key={c} className="flex gap-4 text-sm">
+                <span className="font-mono text-sky-300 w-12 flex-shrink-0">{c}</span>
+                <span className="text-gray-400">{d}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+        <div className="rounded-3xl border border-white/10 bg-white/[0.02] p-7">
+          <h3 className="text-2xl font-semibold tracking-tight mb-2">Eleven ways to cheat, each refused</h3>
+          <p className="text-sm text-gray-500 mb-6">Adversarial tests drive the pure core with a real ledger file, a fake Gateway and a frozen clock, using events in Switch's real frame shape.</p>
+          <ol className="space-y-3">
+            {TESTS.map(([a, b], i) => (
+              <li key={i} className="flex gap-4 text-sm">
+                <span className="font-mono text-gray-500 w-6 flex-shrink-0">{i + 1}</span>
+                <span><span className="text-gray-200">{a}.</span> <span className="text-gray-500">{b}.</span></span>
+              </li>
+            ))}
+          </ol>
+        </div>
+      </FadeInUp>
+    </section>
+  );
+}
+
+/* ---------- run it ---------- */
+
+const SETUP = `git clone https://github.com/kartikangiras/sindarin && cd sindarin
+cp .env.example .env
+scripts/demo.sh`;
+
+const SCRIPT = [
+  ["#acme-finance", "@analyst @planner plan November", ""],
+  ["", "@sindarin-switch approve GOALS-1", "plan room opens"],
+  ["#planning", "@sindarin-ledger sale S-2026-1055 3980.00 Contoso Ltd", "the books move"],
+  ["", "@sindarin-ledger approve BUDGET-1", "refused, re-proposed"],
+  ["", "@sindarin-ledger approve BUDGET-1", "recorded"],
+  ["#plan-2026-11", "@sindarin-ledger approve ENTRIES-1", "planned"],
+  ["#acme-finance", "@analyst @bookkeeper close October", ""],
+  ["", "@sindarin-switch approve CLOSE-1", "period room opens"],
+  ["#payments", "@sindarin-ledger approve PAY-1", "paid"],
+  ["#close-2026-10", "@sindarin-ledger approve LOCK-1", "locked"],
+  ["#sales", "@sales deal Contoso Ltd on Team at 10,200.00", ""],
+  ["", "@sindarin-ledger price Team 12500.00", "the books move"],
+  ["", "@sindarin-ledger approve DEAL-1", "refused, re-proposed, won"],
+  ["anywhere", "@sindarin-switch chart 2026-11 deals", "a PNG in the room"],
+];
+
+const TEAM_STEPS = [
+  {
+    title: "Install and choose the model",
+    text: "Docker Desktop and uv are the prerequisites. The agents run on Claude when the key is set and on a deterministic stand-in when it is empty.",
+    code: ["git clone https://github.com/kartikangiras/sindarin && cd sindarin", "cp .env.example .env", "# in .env: ANTHROPIC_API_KEY=sk-ant-…"],
+  },
+  {
+    title: "Your Mattermost, or the bundled one",
+    text: "Leave MATTERMOST_URL empty and the Switch stack brings its own server. For your company's server, fill these; the bootstrap bridges it to Switch, creates the bot accounts and the rooms there. Bot Account Creation must be enabled on that server.",
+    code: ["MATTERMOST_URL=https://chat.yourcompany.com", "MATTERMOST_ADMIN_USER=… MATTERMOST_ADMIN_PASSWORD=…", "MATTERMOST_USER=you MATTERMOST_USER_PASSWORD=… MATTERMOST_TEAM_NAME=finance"],
+  },
+  {
+    title: "Start everything",
+    text: "One script does the stack, the ledger, the bootstrap and the seven processes. The pieces exist on their own when you want them.",
+    code: ["scripts/demo.sh", "# or: PROFILES=\"gateway collab\" scripts/switch_stack.sh up", "#     uv run sindarin bootstrap --people me", "#     scripts/dev_stack.sh start"],
+  },
+  {
+    title: "Load your numbers",
+    text: "Share your Google Sheet by link, or link an .xlsx, and do it from chat. Tabs: accounts, sales, payables, targets and price_book, with money as cents or decimals. A service-account key turns on write-back of what the executors record.",
+    code: ["@sindarin-switch read <your sheet link>", "@sindarin-ledger load <your sheet link>", "# terminal: uv run sindarin ledger import --sheet <link>  |  --xlsx books.xlsx", "# write-back: SINDARIN_LEDGER_GOOGLE_SA=service-account.json"],
+  },
+  {
+    title: "Decide who approves",
+    text: "Groups are lists of Switch participant ids in agents/policy/policy.yaml: cfo, controllers, board. whoami tells anyone their id. The limits live beside the groups and the executors reload the file when it changes.",
+    code: ["@sindarin-switch whoami", "# policy.yaml: groups.cfo, groups.controllers, groups.board", "# limits: budget 10,000.00 · payment run 10,000.00 · discount 1,000.00 USD"],
+  },
+  {
+    title: "Run your months",
+    text: "Name the month you mean. Goals are computed from the month before it; the close works on any open month; deals land in the newest open month.",
+    code: ["@analyst @planner plan <month>", "@analyst @bookkeeper close <month>", "@sales deal <account> on <product> at <price> [net60|sla]", "@sindarin-switch report <period>   chart <period> revenue   export <period> sales"],
+  },
+  {
+    title: "Operate",
+    text: "Status, health and a clean slate. The adversarial tests run offline in half a minute.",
+    code: ["scripts/dev_stack.sh status | stop", "uv run sindarin doctor", "scripts/reset_demo.sh --rooms", "uv run pytest"],
+  },
+];
+
+function Code({ lines }) {
+  return (
+    <pre className="rounded-xl bg-black/70 border border-white/10 px-4 py-3 text-xs font-mono text-gray-200 overflow-x-auto leading-6">
+      {lines.map((l, i) => <div key={i} className={l.startsWith("#") ? "text-gray-500" : ""}>{l}</div>)}
+    </pre>
+  );
+}
+
+function Run() {
+  return (
+    <section id="run" className="py-24 px-6 max-w-7xl mx-auto">
+      <FadeInUp className="max-w-3xl mb-12">
+        <div className="mb-6"><Badge color="text-pink-300">✨ How to run it</Badge></div>
+        <h2 className="text-4xl md:text-5xl font-semibold tracking-tight mb-5">Your team and your books, or the ten-minute <span className="font-serif italic font-normal">demo.</span></h2>
+        <p className="text-gray-400 text-lg">Two ways in. The left one is how a finance team runs it on its own Mattermost with its own sheet and approvers. The right one is the scripted sample month, you as every approver, for a first look.</p>
+      </FadeInUp>
+      <div className="grid lg:grid-cols-5 gap-6 items-start">
+        <FadeInUp className="lg:col-span-3">
+          <div className="rounded-3xl border border-white/10 bg-white/[0.02] overflow-hidden">
+            <div className="px-6 py-4 border-b border-white/10 flex items-baseline justify-between gap-4 flex-wrap">
+              <h3 className="text-xl font-semibold">For your team</h3>
+              <span className="text-sm text-gray-500">real Mattermost, real sheet, real approvers</span>
+            </div>
+            <ol className="divide-y divide-white/5">
+              {TEAM_STEPS.map((st, i) => (
+                <li key={st.title} className="px-6 py-5 grid md:grid-cols-[2rem_1fr] gap-x-4 gap-y-3">
+                  <span className="font-mono text-sm text-gray-500 pt-0.5">{String(i + 1).padStart(2, "0")}</span>
+                  <div className="min-w-0">
+                    <div className="font-medium mb-1">{st.title}</div>
+                    <p className="text-sm text-gray-400 mb-3">{st.text}</p>
+                    <Code lines={st.code} />
+                  </div>
+                </li>
+              ))}
+            </ol>
+          </div>
+        </FadeInUp>
+        <FadeInUp delay={150} className="lg:col-span-2">
+          <div className="rounded-3xl border border-white/10 bg-[#0d0d10] overflow-hidden">
+            <div className="px-6 py-4 border-b border-white/10 flex items-baseline justify-between gap-4 flex-wrap">
+              <h3 className="text-xl font-semibold">Ten-minute demo</h3>
+              <span className="text-sm text-gray-500">the sample month</span>
+            </div>
+            <div className="px-6 py-5 border-b border-white/10">
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-xs text-gray-500 font-medium">terminal</span>
+                <CopyButton text={SETUP} label="Copy" />
+              </div>
+              <Code lines={SETUP.split("\n")} />
+              <p className="text-sm text-gray-400 mt-3">Then open <span className="text-white">http://localhost:8065</span>, team <span className="font-mono text-white">switch</span>, sign in as <span className="font-mono text-white">user</span> with <span className="font-mono text-white">Sindarin-demo-1</span>. The bootstrap has put that account in every approver group. Plan first, then close: a locked month takes no late sale.</p>
+            </div>
+            <div className="scroll-x">
+              <table className="w-full text-sm font-mono">
+                <tbody>
+                  {SCRIPT.map(([room, cmd, note], i) => (
+                    <tr key={i} className="border-t border-white/5 first:border-0 align-top">
+                      <td className="pl-6 pr-3 py-2 text-gray-500 whitespace-nowrap text-xs">{room}</td>
+                      <td className="px-3 py-2 text-gray-200 whitespace-nowrap">{cmd}</td>
+                      <td className={`pl-3 pr-6 py-2 whitespace-nowrap text-xs ${note.startsWith("refused") || note === "the books move" ? "text-red-300" : "text-emerald-300"}`}>{note}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div className="px-6 py-4 border-t border-white/10 text-sm text-gray-400">
+              Want four people instead of one? <span className="font-mono text-white">PEOPLE=cast scripts/demo.sh</span> sets up John (CFO), Leonardo (controller), Isaac (board) and Vincent (sales, no group), and every refusal becomes a different person.
+            </div>
+          </div>
+        </FadeInUp>
+      </div>
+    </section>
+  );
+}
+
+/* ---------- faq ---------- */
+
+const FAQ = [
+  ["Would it work without Switch?", "No. Switch is the identity every refusal is built on, the transport, the rooms, the documents and the record. Mattermost is only what the people look at; the executors never trust its display names."],
+  ["Why are the executors not Console-run agents?", "Because a prompt can be talked out of a rule. The executors are deterministic code holding one credential each, reading the ledger and refusing by participant id. The five LLM roles can be Console-run agents from the shipped template; the executors cannot."],
+  ["What if I have no Anthropic key?", "The agents run a deterministic stand-in through the same tools and validators. Every proposal, gate and refusal happens exactly as on Claude; only the prose around the numbers is scripted."],
+  ["Is the data hardcoded?", "The sample is one month of CSVs. Paste a link to your own Google Sheet or workbook into chat and the books are yours. Goals are computed from whatever month your sales rows hold; targets and the price book are optional tabs."],
+  ["Is my data safe?", "Everything runs on your machine: Switch, Mattermost and the ledger in Docker and a local SQLite file. The only outbound calls are to the model you configure and to the files you link. No key is ever printed, and the executors hold one credential each."],
+];
+
+function Faq() {
+  const [open, setOpen] = useState(0);
+  return (
+    <section id="faq" className="py-32 px-6 max-w-3xl mx-auto">
+      <FadeInUp>
+        <h2 className="text-4xl md:text-5xl font-semibold tracking-tight mb-12 text-center">We've got answers</h2>
+        <div className="border border-white/10 rounded-xl bg-transparent">
+          {FAQ.map(([q, a], i) => {
+            const isOpen = open === i;
+            return (
+              <div key={q} className={i < FAQ.length - 1 ? "border-b border-white/10" : ""}>
+                <button onClick={() => setOpen(isOpen ? -1 : i)} aria-expanded={isOpen}
+                  className="w-full flex items-center justify-between gap-6 text-left py-6 px-6">
+                  <span className="text-base text-white font-medium">{q}</span>
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"
+                    className={`flex-shrink-0 text-gray-400 transition-transform duration-300 ${isOpen ? "rotate-45" : ""}`}>
+                    <path d="M12 5v14M5 12h14" />
+                  </svg>
+                </button>
+                <div className="grid transition-[grid-template-rows] duration-300 ease-out" style={{ gridTemplateRows: isOpen ? "1fr" : "0fr" }}>
+                  <div className="overflow-hidden"><p className="text-gray-400 text-sm pb-6 px-6">{a}</p></div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </FadeInUp>
+    </section>
+  );
+}
+
+/* ---------- footer ---------- */
+
+function Footer() {
+  const go = (id) => (e) => { e.preventDefault(); scrollTo(id); };
+  return (
+    <footer id="contact" className="relative z-0 pt-32 pb-10 px-6 border-t border-white/5 overflow-hidden">
+      <Video sources={VIDEO.hero} className="absolute inset-0 object-cover w-full h-full opacity-40 -z-10" />
+      <div className="absolute inset-0 -z-10 bg-gradient-to-b from-black via-black/60 to-black" />
+      <FadeInUp className="text-center mb-32">
+        <h2 className="text-4xl md:text-6xl font-medium tracking-tight mb-8">Run your finance month from <span className="font-serif italic font-normal">chat.</span></h2>
+        <div className="flex flex-wrap items-center justify-center gap-3">
+          <PrimaryButton href="#run" onClick={go("run")}>Get started</PrimaryButton>
+          <SecondaryButton href={`${REPO}#readme`}>Read the README</SecondaryButton>
+        </div>
+      </FadeInUp>
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-8 max-w-7xl mx-auto mb-24">
+        <div>
+          <div className="flex items-center gap-2.5 mb-3"><Logo /><span className="text-xl font-bold">Sindarin</span></div>
+          <p className="text-sm text-gray-400 max-w-xs">A company's finance management, run from chat on Switch. Agents draft, the right people approve, deterministic executors move the books. Named for the Doors of Durin: a gate that opens only when the right person speaks.</p>
+        </div>
+        <div>
+          <h4 className="text-sm font-semibold mb-4">Project</h4>
+          <ul className="space-y-2.5">
+            {[["about", "About"], ["workflows", "Workflows"], ["agents", "Agents"], ["commands", "Commands"]].map(([id, l]) => (
+              <li key={id}><a href={`#${id}`} onClick={go(id)} className="text-sm text-gray-400 hover:text-white transition-colors">{l}</a></li>
+            ))}
+          </ul>
+        </div>
+        <div>
+          <h4 className="text-sm font-semibold mb-4">Repository</h4>
+          <ul className="space-y-2.5">
+            <li><a href={REPO} target="_blank" rel="noopener" className="text-sm text-gray-400 hover:text-white transition-colors">Source</a></li>
+            <li><a href={`${REPO}#readme`} target="_blank" rel="noopener" className="text-sm text-gray-400 hover:text-white transition-colors">README</a></li>
+            <li><a href={`${REPO}/tree/main/validation`} target="_blank" rel="noopener" className="text-sm text-gray-400 hover:text-white transition-colors">Adversarial tests</a></li>
+            <li><a href={`${REPO}/tree/main/agents`} target="_blank" rel="noopener" className="text-sm text-gray-400 hover:text-white transition-colors">Prompts and policy</a></li>
+          </ul>
+        </div>
+        <div>
+          <h4 className="text-sm font-semibold mb-4">Connect</h4>
+          <ul className="space-y-2.5">
+            <li><a href={REPO} target="_blank" rel="noopener" className="text-sm text-gray-400 hover:text-white transition-colors">GitHub</a></li>
+            <li><a href="#faq" onClick={go("faq")} className="text-sm text-gray-400 hover:text-white transition-colors">FAQ</a></li>
+            <li><a href="#switch" onClick={go("switch")} className="text-sm text-gray-400 hover:text-white transition-colors">How Switch is used</a></li>
+            <li><a href="#run" onClick={go("run")} className="text-sm text-gray-400 hover:text-white transition-colors">Run it</a></li>
+          </ul>
+        </div>
+      </div>
+      <div className="flex flex-col md:flex-row justify-center items-center gap-4 text-xs text-gray-500 border-t border-white/5 pt-8">
+        <span>© 2026 Sindarin. All rights reserved</span>
+        <span className="hidden md:inline">·</span>
+        <span>Built on <a href="https://www.switchagents.ai/" target="_blank" rel="noopener" className="text-gray-300 hover:text-white">Switch</a></span>
+        <span className="hidden md:inline">·</span>
+        <span>186 tests · 11 adversarial · 7 gates · 3 chains</span>
+      </div>
+    </footer>
+  );
+}
+
+/* ---------- app ---------- */
+
+function App() {
+  return (
+    <div className="bg-black text-white min-h-screen">
+      <Nav />
+      <main>
+        <Hero />
+        <Feature
+          id="features"
+          badge="The month, run from chat"
+          badgeColor="text-yellow-300"
+          title="The plan, the close and the deals, each ending in the books."
+          text="The analyst reports the month, the planner budgets it, the bookkeeper posts it, treasury pays it, sales brings the deals in. Every step is a gate: the right group says yes in the right room, and the executor checks the books still match the proposal before it moves them. The transcript on the right is from the lab."
+          cta="See the three workflows"
+          ctaId="workflows"
+          mockup={<Mockup video={VIDEO.chat}><ChatCard /></Mockup>}
+        />
+        <Feature
+          id="data"
+          badge="Your own sheet, from chat"
+          badgeColor="text-green-300"
+          title="Paste a link. The bot reads the file and says what is wrong with it."
+          text="A Google Sheet shared by link, a file on Drive, an .xlsx or a .csv. Every tab described, repeated invoices and missing columns named with their row numbers, and one command to take it into the books. Nothing is loaded from a file the check fails."
+          cta="See the read and load commands"
+          ctaId="commands"
+          mockup={<Mockup video={VIDEO.data}><ReadCard /></Mockup>}
+          flip
+        />
+        <Workflows />
+        <Agents />
+        <Commands />
+        <Switch />
+        <Run />
+        <Faq />
+      </main>
+      <Footer />
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>

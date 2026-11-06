@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="300" height="64" viewBox="0 0 300 64" fill="none" role="img" aria-label="Sindarin">
+  <g transform="translate(8 8) scale(1.5)" stroke="#ffffff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M7 29V15a9 9 0 0 1 18 0v14"/>
+    <path d="M4 29h24"/>
+    <path d="M11 29V17a5 5 0 0 1 10 0v12"/>
+    <path d="M8 20h16"/>
+  </g>
+  <text x="68" y="42" font-family="Inter, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="30" font-weight="600" letter-spacing="-0.6" fill="#ffffff">Sindarin</text>
+</svg>
