@@ -4,6 +4,15 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Sindarin</title>
+<link rel="icon" type="image/svg+xml" href="brand/icon.svg">
+<link rel="icon" type="image/png" sizes="32x32" href="brand/icon-32.png">
+<link rel="apple-touch-icon" sizes="180x180" href="brand/icon-180.png">
+<meta name="description" content="Sindarin runs a company's finance month from chat on Switch: agents draft, verified people approve, deterministic executors move the books.">
+<meta property="og:title" content="Sindarin">
+<meta property="og:description" content="A company's finance month, run from chat on Switch. Agents draft, the right people approve, deterministic executors move the books.">
+<meta property="og:image" content="https://sindarin-nu.vercel.app/brand/switch-map.jpg">
+<meta property="og:url" content="https://sindarin-nu.vercel.app/">
+<meta name="twitter:card" content="summary_large_image">
 <meta name="description" content="Agents propose, verified people approve, deterministic executors act. A finance management workflow built on Switch.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Instrument+Serif:ital@0;1&display=swap">
@@ -54,8 +63,6 @@ const { useState, useEffect, useRef } = React;
 const REPO = "https://github.com/kartikangiras/sindarin";
 const VIDEO = {
   hero: ["https://cdn.sceneai.art/Hero%20Section%20Video/50b4f304-cdca-4e12-8735-580d225834be.mp4", "media/hero.mp4"],
-  chat: ["https://cdn.sceneai.art/Hero%20Section%20Video/1bcc8fa3-37f6-4c53-8591-0347e4c7f8ac.mp4", "media/chat.mp4"],
-  data: ["https://cdn.sceneai.art/Hero%20Section%20Video/736fd4a0-70ac-4f44-9633-55769ead6aca.mp4", "media/data.mp4"],
 };
 
 const reduceMotion = () => window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -195,7 +202,7 @@ function Nav() {
         </nav>
         <div className="hidden md:flex items-center gap-3">
           <a href={REPO} target="_blank" rel="noopener" className="text-sm font-medium text-gray-300 hover:text-white transition-colors">GitHub</a>
-          <SecondaryButton href="#run" onClick={go("run")}>Get started</SecondaryButton>
+          <SecondaryButton href="#run" onClick={go("run")}>Run it</SecondaryButton>
         </div>
         <button onClick={() => setOpen(!open)} aria-expanded={open} aria-label="Menu" className="md:hidden p-2 text-gray-300 hover:text-white">
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
@@ -205,7 +212,7 @@ function Nav() {
       </div>
       <div className={`md:hidden overflow-hidden transition-all duration-300 ${open ? "max-h-96 border-t border-white/5" : "max-h-0"}`}>
         <div className="px-6 py-4 flex flex-col gap-1">
-          {[...NAV, ["run", "Get started"]].map(([id, label]) => (
+          {[...NAV, ["run", "Run it"]].map(([id, label]) => (
             <a key={id} href={`#${id}`} onClick={go(id)} className="py-2.5 text-sm font-medium text-gray-300 hover:text-white border-b border-white/5 last:border-0">{label}</a>
           ))}
           <a href={REPO} target="_blank" rel="noopener" className="py-2.5 text-sm font-medium text-gray-300 hover:text-white">GitHub</a>
@@ -278,77 +285,6 @@ function Hero() {
 }
 
 /* ---------- feature sections ---------- */
-
-function Mockup({ video, children }) {
-  return (
-    <div className="rounded-3xl overflow-hidden p-8 border border-white/10 relative min-h-[420px] flex items-center">
-      <Video sources={video} className="absolute inset-0 object-cover w-full h-full" />
-      <div className="absolute inset-0 bg-black/20" />
-      <div className="relative w-full">{children}</div>
-    </div>
-  );
-}
-
-function ChatCard() {
-  return (
-    <div className="bg-[#1C1C1E]/90 backdrop-blur-xl border border-white/10 rounded-2xl p-4 text-sm font-mono space-y-3 max-w-md mx-auto">
-      <div className="flex items-center gap-2 text-xs text-gray-400 font-sans"><span className="w-2 h-2 rounded-full bg-emerald-400" />#planning</div>
-      <div><span className="text-gray-400">User</span> <span className="text-sky-300">@sindarin-ledger</span> sale S-2026-1055 3980.00 Contoso Ltd</div>
-      <div><span className="text-gray-400">sindarin-ledger</span> <span className="text-white">S-2026-1055</span> Contoso Ltd 3,980.00 USD landed in 2026-10 · revenue is now 93,885.00 USD.</div>
-      <div><span className="text-gray-400">User</span> <span className="text-sky-300">@sindarin-ledger</span> approve BUDGET-1</div>
-      <div className="text-red-300"><span className="text-gray-400">sindarin-ledger</span> <b>BUDGET-1</b> not applied — the ledger changed since the proposal (2026-10 revenue 89,905.00 USD → 93,885.00 USD).</div>
-      <div><span className="text-gray-400">planner</span> here is the November budget again, against the updated October ledger…</div>
-      <div><span className="text-gray-400">User</span> <span className="text-sky-300">@sindarin-ledger</span> approve BUDGET-1</div>
-      <div className="text-emerald-300"><span className="text-gray-400">sindarin-ledger</span> <b>BUDGET-1</b> approved by User · recorded 16,000.00 USD · 4 lines · verified at 20:01:48 UTC.</div>
-    </div>
-  );
-}
-
-function ReadCard() {
-  const rows = [
-    ["S-2026-1031", "2026-10-01", "Northwind Traders", "12,450.00"],
-    ["S-2026-1032", "2026-10-02", "Contoso Ltd", "8,600.00"],
-    ["S-2026-1041", "2026-10-27", "Wide World Importers", "3,980.00"],
-    ["S-2026-1041", "2026-10-27", "Wide World Importers", "3,980.00"],
-  ];
-  return (
-    <div className="bg-[#1C1C1E]/90 backdrop-blur-xl border border-white/10 rounded-2xl p-4 text-sm max-w-md mx-auto">
-      <div className="flex items-center gap-2 text-xs text-gray-400"><span className="w-2 h-2 rounded-full bg-sky-400" />#acme-finance · <span className="font-mono">@sindarin-switch read &lt;sheet link&gt;</span></div>
-      <div className="mt-3 font-medium">acme.xlsx <span className="text-gray-400 font-normal">· Google Sheet · 5 tabs · 8 KB</span></div>
-      <div className="mt-1 text-gray-400"><b className="text-white font-medium">sales</b> · 13 rows · 93,885.00 USD (89,905.00 USD with each invoice counted once)</div>
-      <div className="mt-3 overflow-hidden rounded-lg border border-white/10">
-        <table className="w-full text-xs font-mono">
-          <tbody>
-            {rows.map((r, i) => (
-              <tr key={i} className={`${i === 3 ? "text-amber-300" : "text-gray-300"} border-t border-white/5 first:border-0`}>
-                {r.map((c, j) => <td key={j} className="px-2 py-1.5 whitespace-nowrap">{c}</td>)}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      <div className="mt-3 text-amber-300 text-xs">⚠ S-2026-1041 appears 2 times (rows 12, 13); the books keep both</div>
-      <div className="mt-2 text-emerald-300 text-xs">As the books: loadable · 2026-10 · <span className="font-mono">load &lt;link&gt;</span> to sindarin-ledger takes it in.</div>
-    </div>
-  );
-}
-
-function Feature({ id, badge, badgeColor, title, text, cta, ctaId, mockup, flip = false }) {
-  const go = (e) => { e.preventDefault(); scrollTo(ctaId); };
-  return (
-    <section id={id} className="py-24 px-6 max-w-7xl mx-auto">
-      <div className="grid lg:grid-cols-2 gap-16 items-center">
-        <FadeInUp className={flip ? "lg:order-2" : ""}>
-          <div className="mb-6"><Badge color={badgeColor}>✨ {badge}</Badge></div>
-          <h2 className="text-4xl md:text-5xl font-semibold tracking-tight mb-6">{title}</h2>
-          <p className="text-gray-400 text-lg mb-8 max-w-xl">{text}</p>
-          <PrimaryButton href={`#${ctaId}`} onClick={go}>{cta}</PrimaryButton>
-        </FadeInUp>
-        <FadeInUp delay={150} className={flip ? "lg:order-1" : ""}>{mockup}</FadeInUp>
-      </div>
-    </section>
-  );
-}
 
 /* ---------- the map ---------- */
 
@@ -643,10 +579,8 @@ const SWITCH = [
   ["Identity", "Every event carries a Switch participant id. Approver groups, proposers and executors are lists of ids in the policy. An impostor renamed \"Isaac\" gets the same refusal as the sales person."],
   ["Rooms", "#acme-finance, #planning, #payments, #sales and the rooms a chain opens are Switch rooms bridged to Mattermost, opened by the executor when the first gate passes."],
   ["Documents, groups, links", "The brief is a Switch document attached to the room. The room is linked from #acme-finance and joins the \"Acme finance\" room group, so the Console shows the month as one thing."],
-  ["Attachments", "Charts, exports and the rows of a linked file go into the room as files through Switch's attachment route."],
-  ["Budgets", "The bootstrap caps every LLM agent at 200,000 output tokens a day with Switch's own usage budgets, a limit beside the gates."],
   ["Routing", "Each agent's addressing policy is scoped to its rooms; the executor that opens a room widens the policies of the agents it puts there. The executors re-check every sender in code anyway."],
-  ["Agents on the protocol", "All seven are registered through the Gateway API and connect over the agent protocol with their own keys. The five LLM roles can also be created as Console-run Claude Code agents from the shipped template; the executors stay external by design."],
+  ["Agents on the protocol", "All seven are registered through the Gateway API and connect over the agent protocol with their own keys. Connect the Switch Console to the server and each room lists them; the Console's own Your Agents page shows only agents it runs, and the Gateway lists all seven. The five LLM roles can also be created as Console-run Claude Code agents from the shipped template; the executors stay external by design."],
   ["The bridge", "Everything on screen is Mattermost, the one bundled with Switch or your own server connected through the Gateway. Remove Switch and there is no identity to verify, no transport, no rooms and no record."],
 ];
 
@@ -693,6 +627,12 @@ function Switch() {
         </div>
         <p className="text-xs text-gray-500 mt-3">Switch at the core. The inner ring is every Switch primitive the project uses, the outer ring is what Sindarin does with each, and the chat apps the collaboration bridge carries sit behind it. Hover a node on the live scene for the detail.</p>
       </FadeInUp>
+      <FadeInUp className="mb-14">
+        <div className="rounded-3xl border border-white/10 bg-[#050506] overflow-hidden">
+          <img src="brand/ecosystem.gif" alt="The Switch Gateway's Ecosystem page for this server: Switch, two Mattermost bridges, the sindarin connector type and its seven agents" className="w-full h-auto block" loading="lazy" />
+        </div>
+        <p className="text-xs text-gray-500 mt-3">The same server as Switch's own Gateway draws it, on its Ecosystem page: Switch in the middle, the two Mattermost bridges above, the sindarin connector type below with its seven agents.</p>
+      </FadeInUp>
       <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-5">
         {SWITCH.map(([t, d], i) => (
           <FadeInUp key={t} delay={(i % 4) * 80} className="h-full">
@@ -735,135 +675,212 @@ function Switch() {
 
 /* ---------- run it ---------- */
 
-const SETUP = `git clone https://github.com/kartikangiras/sindarin && cd sindarin
-cp .env.example .env
-scripts/demo.sh`;
+const SETUP = [
+  ["git clone https://github.com/kartikangiras/sindarin && cd sindarin", "the repository"],
+  ["cp .env.example .env", "one env file; add ANTHROPIC_API_KEY=sk-ant-… to run the agents on Claude, leave it empty for the deterministic stand-in"],
+  ["scripts/demo.sh", "Switch and Mattermost in Docker, the sample ledger, the bootstrap, the seven processes"],
+];
 
-const SCRIPT = [
-  ["#acme-finance", "@analyst @planner plan November", ""],
-  ["", "@sindarin-switch approve GOALS-1", "plan room opens"],
-  ["#planning", "@sindarin-ledger sale S-2026-1055 3980.00 Contoso Ltd", "the books move"],
-  ["", "@sindarin-ledger approve BUDGET-1", "refused, re-proposed"],
-  ["", "@sindarin-ledger approve BUDGET-1", "recorded"],
-  ["#plan-2026-11", "@sindarin-ledger approve ENTRIES-1", "planned"],
-  ["#acme-finance", "@analyst @bookkeeper close October", ""],
-  ["", "@sindarin-switch approve CLOSE-1", "period room opens"],
-  ["#payments", "@sindarin-ledger approve PAY-1", "paid"],
-  ["#close-2026-10", "@sindarin-ledger approve LOCK-1", "locked"],
-  ["#sales", "@sales deal Contoso Ltd on Team at 10,200.00", ""],
-  ["", "@sindarin-ledger price Team 12500.00", "the books move"],
-  ["", "@sindarin-ledger approve DEAL-1", "refused, re-proposed, won"],
-  ["anywhere", "@sindarin-switch chart 2026-11 deals", "a PNG in the room"],
+const DEMO = [
+  ["#acme-finance", "@analyst @planner plan November", "The analyst reports October from the ledger; the planner proposes GOALS-1 for November."],
+  ["", "@sindarin-switch approve GOALS-1", "The plan room #plan-2026-11 opens with the brief; in #planning the planner proposes BUDGET-1."],
+  ["#planning", "@sindarin-ledger sale S-2026-1055 3980.00 Contoso Ltd", "A late sale lands in October: the books move under the pending budget."],
+  ["", "@sindarin-ledger approve BUDGET-1", "Refused: the ledger changed since the proposal, both revenues named. The planner proposes again."],
+  ["", "@sindarin-ledger approve BUDGET-1", "Recorded under the cap. In the plan room the bookkeeper proposes ENTRIES-1."],
+  ["#plan-2026-11", "@sindarin-ledger approve ENTRIES-1", "Four register entries posted, the period is planned, the business is told in its thread."],
+  ["#acme-finance", "@analyst @bookkeeper close October", "The analyst reports October; the bookkeeper proposes CLOSE-1: adjusting entries, the payables to pay, the total."],
+  ["", "@sindarin-switch approve CLOSE-1", "The period room #close-2026-10 opens; in #payments treasury proposes PAY-1."],
+  ["#payments", "@sindarin-ledger approve PAY-1", "Three payables paid and verified by read-back; the bookkeeper proposes LOCK-1."],
+  ["#close-2026-10", "@sindarin-ledger approve LOCK-1", "Entries posted, debits equal credits, the period is locked."],
+  ["#sales", "@sales deal Contoso Ltd on Team at 10,200.00", "Priced from the price book: Team lists at 12,000.00, so the discount needs the CFO. DEAL-1 is proposed."],
+  ["", "@sindarin-ledger price Team 12500.00", "The list price moves under the pending deal: the books move."],
+  ["", "@sindarin-ledger approve DEAL-1", "Refused with both prices; re-proposed at the new discount. Approve again: won, the sale is in November."],
+  ["anywhere", "@sindarin-switch report 2026-11", "The month against its targets, the budget and the planned amounts, with the charts attached as PNGs."],
+];
+
+const DEMO_MORE = [
+  ["uv run python scripts/walkthrough.py", "the same fourteen lines typed for you, with the timing of a demo"],
+  ["PEOPLE=cast scripts/demo.sh", "a four-person team instead of you: John (CFO), Leonardo (controller), Isaac (board), Vincent (sales, no group); every refusal becomes a different person"],
+  ["uv run python scripts/rehearse.py --chain plan", "plays that team through a chain against the live stack, refusals included; also close and sales"],
+  ["scripts/reset_demo.sh --rooms", "back to the start: executor state, the ledger, the rooms a run opened"],
+  ["scripts/demo.sh stop", "stops the seven processes; Switch keeps running"],
+  ["uv run pytest", "194 tests, eleven of them adversarial, each writing a transcript to validation/reports/"],
 ];
 
 const TEAM_STEPS = [
   {
     title: "Install and choose the model",
     text: "Docker Desktop and uv are the prerequisites. The agents run on Claude when the key is set and on a deterministic stand-in when it is empty.",
-    code: ["git clone https://github.com/kartikangiras/sindarin && cd sindarin", "cp .env.example .env", "# in .env: ANTHROPIC_API_KEY=sk-ant-…"],
+    lines: [
+      ["git clone https://github.com/kartikangiras/sindarin && cd sindarin", "the repository"],
+      ["cp .env.example .env", "the one env file every process is handed its own block of"],
+      ["ANTHROPIC_API_KEY=sk-ant-…", "in .env: the model key, reaching the five agents only"],
+    ],
   },
   {
     title: "Your Mattermost, or the bundled one",
-    text: "Leave MATTERMOST_URL empty and the Switch stack brings its own server. For your company's server, fill these; the bootstrap bridges it to Switch, creates the bot accounts and the rooms there. Bot Account Creation must be enabled on that server.",
-    code: ["MATTERMOST_URL=https://chat.yourcompany.com", "MATTERMOST_ADMIN_USER=… MATTERMOST_ADMIN_PASSWORD=…", "MATTERMOST_USER=you MATTERMOST_USER_PASSWORD=… MATTERMOST_TEAM_NAME=finance"],
+    text: "Leave MATTERMOST_URL empty and the Switch stack brings its own server. For your company's server, fill these in .env; the bootstrap bridges it to Switch and creates the bot accounts and the rooms there. Bot Account Creation must be enabled on that server.",
+    lines: [
+      ["MATTERMOST_URL=https://chat.yourcompany.com", "your server; Switch connects to it as a new bridge"],
+      ["MATTERMOST_ADMIN_USER=…", "an admin: Switch signs in as it to create the agents' bot accounts"],
+      ["MATTERMOST_ADMIN_PASSWORD=…", ""],
+      ["MATTERMOST_USER=you", "the account you drive from; put in every room and approver group"],
+      ["MATTERMOST_USER_PASSWORD=…", ""],
+      ["MATTERMOST_TEAM_NAME=finance", "the team the rooms are created in"],
+    ],
   },
   {
     title: "Start everything",
-    text: "One script does the stack, the ledger, the bootstrap and the seven processes. The pieces exist on their own when you want them.",
-    code: ["scripts/demo.sh", "# or: PROFILES=\"gateway collab\" scripts/switch_stack.sh up", "#     uv run sindarin bootstrap --people me", "#     scripts/dev_stack.sh start"],
+    text: "One script does the stack, the ledger, the bootstrap and the seven processes. Then name the month you mean: goals are computed from the month before it, the close works on any open month, deals land in the newest open month.",
+    lines: [
+      ["scripts/demo.sh", "all of it, in order"],
+      ["PROFILES=\"gateway collab\" scripts/switch_stack.sh up", "or one piece at a time: Switch, its Gateway and Mattermost in Docker"],
+      ["uv run sindarin ledger import", "the ledger, from the sample or from your file (next step)"],
+      ["uv run sindarin bootstrap --people me", "registers the seven agents on the Gateway, creates the rooms, writes the policy with real participant ids, groups the rooms, sets the budgets"],
+      ["scripts/dev_stack.sh start", "the seven processes; --fake runs the agents on the stand-in"],
+      ["uv run sindarin doctor", "says what is missing, if anything is"],
+    ],
   },
   {
     title: "Load your numbers",
-    text: "Share your Google Sheet by link, or link an .xlsx, and do it from chat. Tabs: accounts, sales, payables, targets and price_book, with money as cents or decimals. A service-account key turns on write-back of what the executors record.",
-    code: ["@sindarin-switch read <your sheet link>", "@sindarin-ledger load <your sheet link>", "# terminal: uv run sindarin ledger import --sheet <link>  |  --xlsx books.xlsx", "# write-back: SINDARIN_LEDGER_GOOGLE_SA=service-account.json"],
+    text: "A Google Sheet shared by link, or an Excel workbook, with the tabs accounts, sales, payables, targets and, for deals, price_book; money as cents (amount_cents) or decimals (amount). From chat or from the terminal.",
+    lines: [
+      ["@sindarin-switch read <your sheet link>", "in chat: what the file holds, tab by tab, repeated invoices and missing columns named, and whether the books can take it"],
+      ["@sindarin-ledger load <your sheet link>", "in chat: into the books, by someone in an approver group; open rows replaced, paid payables and locked months kept"],
+      ["uv run sindarin ledger import --sheet <link>", "in the terminal: the same, from a Google Sheet"],
+      ["uv run sindarin ledger import --xlsx books.xlsx", "or from an Excel workbook"],
+      ["uv run sindarin ledger export-xlsx books.xlsx", "the whole ledger back out, one sheet per table"],
+      ["SINDARIN_LEDGER_GOOGLE_SA=service-account.json", "in .env: write-back of what the executors record into tabs of the same sheet"],
+    ],
   },
   {
     title: "Decide who approves",
-    text: "Add a colleague by Mattermost username and name the groups they approve for: the account is found or created, put in every room, and its participant id written into the policy, which the executors reload on their own. The limits sit beside the groups in agents/policy/policy.yaml and are yours to change.",
-    code: ["uv run sindarin people add alice --groups cfo,controllers", "uv run sindarin people list", "@sindarin-switch whoami", "# limits in policy.yaml: budget 10,000.00 · payment run 10,000.00 · discount 1,000.00 USD"],
+    text: "A colleague by Mattermost username and the groups they approve for: the account is found or created, put in every room, and its participant id written into the policy, which the executors reload on their own. The limits sit next to the groups in agents/policy/policy.yaml.",
+    lines: [
+      ["uv run sindarin people add alice --groups cfo,controllers", "Alice into every room and the two groups"],
+      ["uv run sindarin people list", "who approves what"],
+      ["uv run sindarin people remove alice", "out of the groups; the account stays"],
+      ["@sindarin-switch whoami", "in chat: the participant id the policy names, and its groups"],
+      ["budget 10,000.00 · payment run 10,000.00 · discount 1,000.00 USD", "the limits, in policy.yaml, yours to change"],
+    ],
   },
   {
-    title: "Run your months",
-    text: "Name the month you mean. Goals are computed from the month before it; the close works on any open month; deals land in the newest open month.",
-    code: ["@analyst @planner plan <month>", "@analyst @bookkeeper close <month>", "@sales deal <account> on <product> at <price> [net60|sla]", "@sindarin-switch report <period>   chart <period> revenue   export <period> sales"],
-  },
-  {
-    title: "Operate",
-    text: "Status, health and a clean slate. The adversarial tests run offline in half a minute.",
-    code: ["scripts/dev_stack.sh status | stop", "uv run sindarin doctor", "scripts/reset_demo.sh --rooms", "uv run pytest"],
+    title: "See it in Switch",
+    text: "In the Switch Console choose Add a server, Connect to an existing server, the address below, and sign in as the Gateway admin. Your Rooms shows the four rooms with their agents, the group and the documents a chain attaches; the Gateway lists the seven agents and the Ecosystem page. If the stack is ever recreated, sign in again.",
+    lines: [
+      ["http://localhost:8000", "the server address the Console asks for"],
+      ["http://127.0.0.1:3000", "the Gateway, same sign-in"],
+      ["grep -E '^GATEWAY_ADMIN_(EMAIL|PASSWORD)=' ~/.sindarin/switch-stack/.env", "the admin account the stack created"],
+    ],
   },
 ];
 
-function Code({ lines }) {
+/* one command, token by token: mentions by executor, verbs, ids, amounts, flags, env keys */
+const MENTION = { "@sindarin-switch": "text-sky-300", "@sindarin-ledger": "text-violet-300" };
+const VERBS = /^(approve|deny|changes|status|whoami|help|board|brief|sale|price|load|read|report|export|chart|audit|plan|close|deal)$/;
+function Cmd({ text }) {
+  if (text.startsWith("#")) return <span className="text-gray-500">{text}</span>;
+  const parts = text.split(/(\s+)/);
+  const chat = parts[0].startsWith("@");
   return (
-    <pre className="rounded-xl bg-black/70 border border-white/10 px-4 py-3 text-xs font-mono text-gray-200 overflow-x-auto leading-6">
-      {lines.map((l, i) => <div key={i} className={l.startsWith("#") ? "text-gray-500" : ""}>{l}</div>)}
-    </pre>
+    <span className="font-mono">
+      {parts.map((t, i) => {
+        if (/^\s+$/.test(t)) return t;
+        const env = t.match(/^([A-Z][A-Z0-9_]*)=(.*)$/);
+        if (env) return <span key={i}><span className="text-emerald-300">{env[1]}</span><span className="text-gray-500">=</span><span className="text-gray-200">{env[2]}</span></span>;
+        let cls = "text-gray-200";
+        if (t.startsWith("@")) cls = MENTION[t] || "text-amber-300";
+        else if (/^(GOALS|BUDGET|ENTRIES|CLOSE|PAY|LOCK|DEAL)-\d+$/.test(t)) cls = "text-pink-300";
+        else if (/^\d[\d,]*(\.\d+)?$/.test(t)) cls = "text-yellow-200";
+        else if (/^<.*>$/.test(t)) cls = "text-gray-400 italic";
+        else if (t.startsWith("--")) cls = "text-sky-300";
+        else if (t.startsWith("#")) cls = "text-violet-200";
+        else if (chat && VERBS.test(t)) cls = "text-white font-semibold";
+        else if (!chat && i === 0) cls = "text-white";
+        return <span key={i} className={cls}>{t}</span>;
+      })}
+    </span>
+  );
+}
+
+function CmdRows({ rows, lead }) {
+  return (
+    <div className="rounded-2xl border border-white/10 bg-black/60 divide-y divide-white/5 overflow-hidden">
+      {rows.map(([a, b, c], i) => (
+        <div key={i} className={`grid gap-x-6 gap-y-1 px-5 py-3 text-sm ${lead ? "md:grid-cols-[9rem_minmax(0,1fr)_minmax(0,1.1fr)]" : "md:grid-cols-[minmax(0,1fr)_minmax(0,1.1fr)]"}`}>
+          {lead && <span className="font-mono text-xs text-gray-500 pt-0.5">{a}</span>}
+          <span className="min-w-0 break-words"><Cmd text={lead ? b : a} /></span>
+          <span className={`leading-relaxed ${(lead ? c : b).startsWith("Refused") ? "text-red-300" : (lead ? c : b).includes("the books move") ? "text-amber-200" : "text-gray-400"}`}>{lead ? c : b}</span>
+        </div>
+      ))}
+    </div>
   );
 }
 
 function Run() {
+  const setupText = SETUP.map(([c]) => c).join("\n");
   return (
     <section id="run" className="py-24 px-6 max-w-7xl mx-auto">
       <FadeInUp className="max-w-3xl mb-12">
         <div className="mb-6"><Badge color="text-pink-300">✨ How to run it</Badge></div>
-        <h2 className="text-4xl md:text-5xl font-semibold tracking-tight mb-5">Your team and your books, or the ten-minute <span className="font-serif italic font-normal">demo.</span></h2>
-        <p className="text-gray-400 text-lg">Two ways in. The left one is how a finance team runs it on its own Mattermost with its own sheet and approvers. The right one is the scripted sample month, you as every approver, for a first look.</p>
+        <h2 className="text-4xl md:text-5xl font-semibold tracking-tight mb-5">The ten-minute demo first, then your team and your <span className="font-serif italic font-normal">books.</span></h2>
+        <p className="text-gray-400 text-lg">The demo is the sample month with you as every approver. Below it, the same workflows on your Mattermost with your sheet and your approvers. Every command is on its own line with what it does next to it.</p>
+        <div className="flex flex-wrap gap-x-5 gap-y-2 mt-5 text-xs text-gray-500 font-mono">
+          <span><span className="text-amber-300">@agent</span> asks</span>
+          <span><span className="text-sky-300">@sindarin-switch</span> rooms, reports</span>
+          <span><span className="text-violet-300">@sindarin-ledger</span> the books</span>
+          <span><span className="text-white font-semibold">verb</span></span>
+          <span><span className="text-pink-300">GOALS-1</span> ids</span>
+          <span><span className="text-yellow-200">10,200.00</span> amounts</span>
+          <span><span className="text-emerald-300">KEY</span>=value env</span>
+        </div>
       </FadeInUp>
-      <div className="grid lg:grid-cols-5 gap-6 items-start">
-        <FadeInUp className="lg:col-span-3">
-          <div className="rounded-3xl border border-white/10 bg-white/[0.02] overflow-hidden">
-            <div className="px-6 py-4 border-b border-white/10 flex items-baseline justify-between gap-4 flex-wrap">
-              <h3 className="text-xl font-semibold">For your team</h3>
-              <span className="text-sm text-gray-500">real Mattermost, real sheet, real approvers</span>
-            </div>
-            <ol className="divide-y divide-white/5">
-              {TEAM_STEPS.map((st, i) => (
-                <li key={st.title} className="px-6 py-5 grid md:grid-cols-[2rem_1fr] gap-x-4 gap-y-3">
-                  <span className="font-mono text-sm text-gray-500 pt-0.5">{String(i + 1).padStart(2, "0")}</span>
-                  <div className="min-w-0">
-                    <div className="font-medium mb-1">{st.title}</div>
-                    <p className="text-sm text-gray-400 mb-3">{st.text}</p>
-                    <Code lines={st.code} />
-                  </div>
-                </li>
-              ))}
-            </ol>
+
+      <FadeInUp>
+        <div className="rounded-3xl border border-white/10 bg-[#0d0d10] overflow-hidden mb-8">
+          <div className="px-6 py-4 border-b border-white/10 flex items-baseline justify-between gap-4 flex-wrap">
+            <h3 className="text-xl font-semibold">1 · The ten-minute demo</h3>
+            <span className="text-sm text-gray-500">the sample month, you as every approver</span>
           </div>
-        </FadeInUp>
-        <FadeInUp delay={150} className="lg:col-span-2">
-          <div className="rounded-3xl border border-white/10 bg-[#0d0d10] overflow-hidden">
-            <div className="px-6 py-4 border-b border-white/10 flex items-baseline justify-between gap-4 flex-wrap">
-              <h3 className="text-xl font-semibold">Ten-minute demo</h3>
-              <span className="text-sm text-gray-500">the sample month</span>
+          <div className="px-6 py-5 border-b border-white/10">
+            <div className="flex items-center justify-between mb-3">
+              <span className="text-xs text-gray-500 font-medium">terminal</span>
+              <CopyButton text={setupText} label="Copy the three lines" />
             </div>
-            <div className="px-6 py-5 border-b border-white/10">
-              <div className="flex items-center justify-between mb-2">
-                <span className="text-xs text-gray-500 font-medium">terminal</span>
-                <CopyButton text={SETUP} label="Copy" />
-              </div>
-              <Code lines={SETUP.split("\n")} />
-              <p className="text-sm text-gray-400 mt-3">Then open <span className="text-white">http://localhost:8065</span>, team <span className="font-mono text-white">switch</span>, sign in as <span className="font-mono text-white">user</span> with <span className="font-mono text-white">Sindarin-demo-1</span>. The bootstrap has put that account in every approver group. Plan first, then close: a locked month takes no late sale.</p>
-            </div>
-            <div className="scroll-x">
-              <table className="w-full text-sm font-mono">
-                <tbody>
-                  {SCRIPT.map(([room, cmd, note], i) => (
-                    <tr key={i} className="border-t border-white/5 first:border-0 align-top">
-                      <td className="pl-6 pr-3 py-2 text-gray-500 whitespace-nowrap text-xs">{room}</td>
-                      <td className="px-3 py-2 text-gray-200 whitespace-nowrap">{cmd}</td>
-                      <td className={`pl-3 pr-6 py-2 whitespace-nowrap text-xs ${note.startsWith("refused") || note === "the books move" ? "text-red-300" : "text-emerald-300"}`}>{note}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-            <div className="px-6 py-4 border-t border-white/10 text-sm text-gray-400">
-              Want four people instead of one? <span className="font-mono text-white">PEOPLE=cast scripts/demo.sh</span> sets up John (CFO), Leonardo (controller), Isaac (board) and Vincent (sales, no group), and every refusal becomes a different person.
-            </div>
+            <CmdRows rows={SETUP} />
+            <p className="text-sm text-gray-400 mt-4">Then open <span className="text-white">http://localhost:8065</span>, team <span className="font-mono text-white">switch</span>, and sign in as <span className="font-mono text-white">user</span> with <span className="font-mono text-white">Sindarin-demo-1</span>. The bootstrap has put that account in every room and every approver group. Plan first, then close: a locked month takes no late sale.</p>
           </div>
-        </FadeInUp>
-      </div>
+          <div className="px-6 py-5 border-b border-white/10">
+            <div className="text-xs text-gray-500 font-medium mb-3">in Mattermost, in this order</div>
+            <CmdRows rows={DEMO} lead />
+          </div>
+          <div className="px-6 py-5">
+            <div className="text-xs text-gray-500 font-medium mb-3">also in the terminal</div>
+            <CmdRows rows={DEMO_MORE} />
+          </div>
+        </div>
+      </FadeInUp>
+
+      <FadeInUp delay={100}>
+        <div className="rounded-3xl border border-white/10 bg-white/[0.02] overflow-hidden">
+          <div className="px-6 py-4 border-b border-white/10 flex items-baseline justify-between gap-4 flex-wrap">
+            <h3 className="text-xl font-semibold">2 · Your team, your books</h3>
+            <span className="text-sm text-gray-500">your Mattermost, your sheet, your approvers</span>
+          </div>
+          <ol className="divide-y divide-white/5">
+            {TEAM_STEPS.map((st, i) => (
+              <li key={st.title} className="px-6 py-6 grid md:grid-cols-[2.5rem_minmax(0,1fr)] gap-x-4 gap-y-3">
+                <span className="font-mono text-sm text-gray-500 pt-0.5">{String(i + 1).padStart(2, "0")}</span>
+                <div className="min-w-0">
+                  <div className="font-medium text-lg mb-1">{st.title}</div>
+                  <p className="text-sm text-gray-400 mb-4 max-w-4xl">{st.text}</p>
+                  <CmdRows rows={st.lines} />
+                </div>
+              </li>
+            ))}
+          </ol>
+        </div>
+      </FadeInUp>
     </section>
   );
 }
@@ -975,27 +992,6 @@ function App() {
       <Nav />
       <main>
         <Hero />
-        <Feature
-          id="features"
-          badge="The month, run from chat"
-          badgeColor="text-yellow-300"
-          title="The plan, the close and the deals, each ending in the books."
-          text="The analyst reports the month, the planner budgets it, the bookkeeper posts it, treasury pays it, sales brings the deals in. Every step is a gate: the right group says yes in the right room, and the executor checks the books still match the proposal before it moves them. The transcript on the right is from the lab."
-          cta="See the three workflows"
-          ctaId="workflows"
-          mockup={<Mockup video={VIDEO.chat}><ChatCard /></Mockup>}
-        />
-        <Feature
-          id="data"
-          badge="Your own sheet, from chat"
-          badgeColor="text-green-300"
-          title="Paste a link. The bot reads the file and says what is wrong with it."
-          text="A Google Sheet shared by link, a file on Drive, an .xlsx or a .csv. Every tab described, repeated invoices and missing columns named with their row numbers, and one command to take it into the books. Nothing is loaded from a file the check fails."
-          cta="See the read and load commands"
-          ctaId="commands"
-          mockup={<Mockup video={VIDEO.data}><ReadCard /></Mockup>}
-          flip
-        />
         <ProjectMap />
         <Workflows />
         <Agents />
