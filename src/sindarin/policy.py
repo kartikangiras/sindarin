@@ -281,8 +281,11 @@ def check_facts(policy: Policy, proposal: Proposal, facts: dict[str, Any]) -> st
             return f"{body.deal_id} is already won"
         return None
     if proposal.kind is Kind.LOCK:
-        if facts.get("period_status") != "open":
-            return f"period {body.period} is {facts.get('period_status') or 'unknown'}, not open"
+        # a planned period is the normal case: its budget was posted before the month began,
+        # and it is closed when the month ends. Only a locked (or unknown) period refuses.
+        status = facts.get("period_status")
+        if status not in ("open", "planned"):
+            return f"period {body.period} is {status or 'unknown'}, not open"
         if int(facts.get("open_payables", 0)) > 0:
             return f"{facts['open_payables']} payable(s) still open in {body.period}"
         return None

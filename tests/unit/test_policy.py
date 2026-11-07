@@ -18,6 +18,7 @@ from validation.harness import (
     budget_proposal,
     entries_proposal,
     goals_proposal,
+    lock_proposal,
 )
 
 from sindarin.ledger import Ledger
@@ -149,3 +150,14 @@ def test_check_target_and_facts(books):
         POLICY, entries, {**ok, "budget_lines": lines[1:]}
     )
     assert "is planned, already" in check_facts(POLICY, entries, {**ok, "period_status": "planned"})
+
+
+def test_a_planned_period_locks_and_a_locked_one_refuses(books):
+    """A month planned in advance (its budget entries posted) is the normal month to close."""
+    lock = lock_proposal(books)
+    ok = {"period_status": "open", "open_payables": 0}
+    assert check_facts(POLICY, lock, ok) is None
+    assert check_facts(POLICY, lock, {**ok, "period_status": "planned"}) is None
+    assert "is locked, not open" in check_facts(POLICY, lock, {**ok, "period_status": "locked"})
+    assert "is unknown, not open" in check_facts(POLICY, lock, {**ok, "period_status": None})
+    assert "2 payable(s) still open" in check_facts(POLICY, lock, {**ok, "open_payables": 2})
