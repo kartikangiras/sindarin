@@ -179,7 +179,7 @@ class RoleAgent:
                 text = "\n".join(
                     getattr(b, "text", "") for b in blocks if getattr(b, "type", "") == "text"
                 ).strip()
-                return self.guard(text, tool_outputs)
+                return self.guard(text, tool_outputs, last_fenced)
             messages.append({"role": "assistant", "content": _as_params(blocks)})
             results = []
             for tu in tool_uses:
@@ -215,16 +215,29 @@ class RoleAgent:
         return "I could not finish within the turn budget. A person should take a look."
 
     @staticmethod
-    def guard(text: str, tool_outputs: set[str]) -> str:
+    def guard(text: str, tool_outputs: set[str], last: str | None = None) -> str:
         """Every fence in the text must be byte for byte one the validator produced. Text around
-        a legitimate fence is kept (caption and interpretation lines, rule 6)."""
-        if not FENCE_RE.search(text):
+        a legitimate fence is kept (caption and interpretation lines, rule 6). When the
+        validator did produce a block this turn (`last`) and the model retyped it with a
+        difference, or left it out, the validator's block is posted in its place: the
+        executor re-verifies every field anyway, and a refusal in the room helps nobody
+        (seen live 2026-11-08: the planner paraphrased its own fence). A fence with no
+        validator behind it is still refused."""
+        fences = [m.group(0) for m in FENCE_RE.finditer(text)]
+        if not fences:
+            if last is not None and text:
+                log.warning("the model left the validated block out; posting it after its text")
+                return f"{text}\n{last}"
             return text or "I have nothing to add."
-        kept = text
-        for m in FENCE_RE.finditer(text):
-            fence = m.group(0)
-            if not any(fence in out for out in tool_outputs):
+        if len(fences) > 1:
+            return REFUSAL  # one artifact per message (rule 9); two blocks is never right
+        fence = fences[0]
+        if not any(fence in out for out in tool_outputs):
+            if last is None:
                 return REFUSAL
+            log.warning("the model retyped the validated block; posting the validator's instead")
+            text = text.replace(fence, FENCE_RE.search(last).group(0), 1)  # type: ignore[union-attr]
+        kept = text
         for out in tool_outputs:
             # the tool output includes the executor mention line; make sure it is present once
             if out in kept:

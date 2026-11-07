@@ -118,6 +118,10 @@ class LedgerAdapter:
         self.billing = billing  # a StripeBilling when invoicing is on: a won deal is invoiced
         self.crm = crm  # a HubSpot when the CRM is on: the deal lives there too
         self.esign = esign  # a DropboxSign when e-signature is on: the order form goes out
+        for client in (self.rail, self.billing):
+            # the books id namespaces the idempotency keys: PAY-1 after a reset is a new run
+            if client is not None and hasattr(client, "key_ns"):
+                client.key_ns = ledger.books_id()
 
     def crm_sync(self, artifact: Artifact, stage: str, *, known_id: str | None = None) -> dict:
         if self.crm is None:

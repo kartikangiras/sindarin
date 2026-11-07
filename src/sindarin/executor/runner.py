@@ -917,7 +917,10 @@ class Effector:
             return self.apply([core.Post(e.room_id, "No ledger here to pack.", e.thread_id)])
         try:
             if e.period not in self.ledger.periods():
-                raise reports.ReportError(f"the ledger has no period {e.period}")
+                held = ", ".join(self.ledger.periods()) or "no period at all"
+                raise reports.ReportError(
+                    f"the ledger has no period {e.period} yet; it holds {held}"
+                )
             label = month_label(e.period)
             summary = self.ledger.summary(e.period)
             text = reports.report(self.ledger, e.period).text

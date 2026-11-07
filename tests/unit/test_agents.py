@@ -100,6 +100,15 @@ def test_guard_only_passes_validator_fences():
     assert RoleAgent.guard("look\n" + out + "\n" + forged, {out}) == REFUSAL
     assert RoleAgent.guard("plain text", set()) == "plain text"
     assert RoleAgent.guard("", set()) == "I have nothing to add."
+    # the validator produced a block this turn: a retyped fence is swapped for the real one,
+    # a missing one is appended, two fences are still refused
+    assert RoleAgent.guard("look\n" + forged + "\nYour call.", {out}, out) == (
+        "look\n" + out + "\nYour call."
+    )
+    assert RoleAgent.guard("On it, the goals are below.", {out}, out) == (
+        "On it, the goals are below.\n" + out
+    )
+    assert RoleAgent.guard("look\n" + out + "\n" + forged, {out}, out) == REFUSAL
 
 
 def test_hand_written_fence_from_the_model_is_refused(books):
@@ -342,6 +351,29 @@ def test_agent_md_files_exist_and_name_the_rules(repo_root):
     assert "Your call" in (repo_root / "agents" / "planner" / "AGENT.md").read_text()
     assert json.loads(extract_fences("```sindarin-proposal\n{}\n```", PROPOSAL_FENCE)[0]) == {}
     assert parse_proposal("```sindarin-proposal\n{}\n```")[1] is not None
+
+
+def test_a_retyped_fence_is_replaced_by_the_validators_block(tmp_path):
+    """Seen live 2026-11-08: the planner ran its tool, then wrote the block out again with a
+    difference, and the room got a refusal. The validator's block goes out instead."""
+    block = '@sindarin-switch proposal\n```sindarin-proposal\n{"kind": "goals", "x": 1}\n```'
+    md = tmp_path / "AGENT.md"
+    md.write_text("You propose.")
+    turn = Turn(sender="@switch-mattermost-x-isaac:localhost", sender_name="Isaac", body="go")
+    proposing = Tool(strict_tool("propose", "validates", {}, []), lambda args: (block, True))
+    calls = {"n": 0}
+
+    def script(m, s):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return ("tool", "propose", {})
+        retyped = 'On it.\n```sindarin-proposal\n{"kind": "goals", "x": 1 }\n```\nYour call.'
+        return ("text", retyped)
+
+    agent = RoleAgent(
+        role="planner", agent_md=md, tools=[proposing], model_call=ScriptedModel(script)
+    )
+    assert agent.respond([turn], "header") == "On it.\n" + block + "\nYour call."
 
 
 def test_turn_budget_posts_the_last_validated_block(tmp_path):

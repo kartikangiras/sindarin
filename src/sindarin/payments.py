@@ -136,9 +136,13 @@ class StripeRail:
         if not secret_key:
             raise RailError("Stripe: no secret key")
         self.test_mode = secret_key.startswith("sk_test_")
+        self.key_ns = ""  # the books id, set by the adapter: keys are new after a reset
         self._http = httpx.Client(
             base_url=STRIPE_API, auth=(secret_key, ""), timeout=20.0, transport=transport
         )
+
+    def _key(self, *parts: str) -> str:
+        return "-".join(("sindarin", *([self.key_ns] if self.key_ns else []), *parts))
 
     def close(self) -> None:
         self._http.close()
@@ -186,14 +190,14 @@ class StripeRail:
                 "source": "tok_bypassPending",
                 "description": f"Sindarin test balance for {run_id}",
             },
-            key=f"sindarin-{run_id}-topup",
+            key=self._key(run_id, "topup"),
         )
 
     def send(self, run_id: str, lines: Iterable[PaymentLine]) -> dict[str, Transfer]:
         out: dict[str, Transfer] = {}
         rows = list(lines)
         for x in rows:
-            key = f"sindarin-{run_id}-{x.invoice}"
+            key = self._key(run_id, x.invoice)
             try:
                 created = self._payout(run_id, x, key)
             except StripeRefusal as exc:
@@ -285,6 +289,7 @@ class IncreaseRail:
             raise RailError("Increase: no API key")
         self.sandbox = sandbox
         self.entity_id = entity_id
+        self.key_ns = ""  # the books id, set by the adapter: keys are new after a reset
         self.state_path = Path(state_path)
         self.vendor_banks = dict(vendor_banks or {})  # vendor → "routing:account"
         self._http = httpx.Client(
@@ -301,6 +306,9 @@ class IncreaseRail:
 
     def close(self) -> None:
         self._http.close()
+
+    def _key(self, *parts: str) -> str:
+        return "-".join(("sindarin", *([self.key_ns] if self.key_ns else []), *parts))
 
     def _save(self) -> None:
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
@@ -454,7 +462,7 @@ class IncreaseRail:
             available = self.balance()
             if available < total:
                 if self.sandbox:
-                    self.fund(total - available, key=f"sindarin-{run_id}-fund")
+                    self.fund(total - available, key=self._key(run_id, "fund"))
                 else:
                     short = (
                         f"available balance {available / 100:,.2f} is short of {total / 100:,.2f}"
@@ -476,7 +484,7 @@ class IncreaseRail:
                         "statement_descriptor": f"Sindarin {run_id} {x.invoice}"[:200],
                         "require_approval": False,
                     },
-                    key=f"sindarin-{run_id}-{x.invoice}",
+                    key=self._key(run_id, x.invoice),
                 )
                 ref = str(created.get("id") or "")
                 seen = self._call("GET", f"/ach_transfers/{ref}") if ref else {}

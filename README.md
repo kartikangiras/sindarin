@@ -370,6 +370,22 @@ Ecosystem page above. If the stack is ever recreated, sign in again.
 grep -E '^GATEWAY_ADMIN_(EMAIL|PASSWORD)=' ~/.sindarin/switch-stack/.env
 ```
 
+## Real integrations
+
+Every one is a key in `.env` and a single command, off until you turn it on. The executors
+hold the keys and make the calls after a person has said yes; the agents never see them, and
+every write is read back before the room is told.
+
+| Tool | What it does | Turn on |
+|---|---|---|
+| Increase, money out | One ACH transfer per payable from an operating account: balance read first, each transfer keyed on the run and the invoice, read back, polled until settled. The sandbox needs no signup. | `uv run sindarin rail increase` |
+| Stripe, money in | A won deal becomes a finalized invoice with the hosted page in the thread; the receipt is booked when the customer pays. Also a payout rail where the account takes a test bank account. | `uv run sindarin invoicing stripe` |
+| HubSpot, the deal | Created at an open stage when proposed, closed won on approval, closed lost on denial, link in the thread. | `uv run sindarin connect hubspot` |
+| Dropbox Sign, the order form | Rendered from the approved price, sent to the signer in test mode, polled until signed, the signature announced. | `uv run sindarin connect dropbox-sign` |
+| Google Sheets and Excel, the record | The team's workbook loaded from a link; the budget, planned lines, payables and sales written back. | `@sindarin-ledger load <link>` |
+| Bank file, the rail with no account | The default: a CSV batch for the bank portal in the thread, confirmed by a person before anything is booked. | `@sindarin-ledger paid PAY-1 <ref>` |
+| Google Drive and Slides, the board pack | A locked month's report, charts and exports in a Drive folder with a Slides deck. | `uv run sindarin connect drive` |
+
 ## Commands
 
 Agents answer to a mention in words; executors answer to a command. Ids are `GOALS-n`,
@@ -454,17 +470,3 @@ Switch's real frame shape, and each writes a transcript to `validation/reports/`
 | 10 | A lock before the plan, before the run is paid, from the wrong room | each refused and named; the period locks only after its run, from its own room |
 | 11 | A deal at 15% off approved by a controller, by sales; a fence with its own list price; the price book edited under the pending deal; a deal into a locked month | refused with the discount and the limit; not in the group; the price book is the list price; both prices named and the re-proposal won; a locked month takes no deal |
 | 12 | `paid PAY-1` before the run is sent, by the treasury agent, by Vincent, from the period room, twice | each refused and named; the approved run is sent with its bank file and nothing booked; one confirmation by John books it under the reference and the lock follows |
-
-## Repository
-
-`src/sindarin/executor/` the executors (`core.py` pure, `commands.py` the command grammar) ·
-`src/sindarin/ledger.py` the ledger · `src/sindarin/sheets.py` Google Sheets and Excel ·
-`src/sindarin/reports.py` reports, exports and charts · `src/sindarin/workbook.py` any linked
-file, read and checked · `src/sindarin/people.py` colleagues into rooms and groups ·
-`src/sindarin/adapters/` the ledger, the Switch rooms and the Switch files adapters ·
-`src/sindarin/agents/` the five roles on the Anthropic SDK and their stand-ins ·
-`src/sindarin/switch/` the agent-protocol client and the Gateway client ·
-`agents/<role>/AGENT.md` the prompts, `agents/policy/` the groups and rules · `executor/` the two
-executor configs · `data/acme/` the sample month · `validation/` the twelve adversarial tests · `src/sindarin/payments.py` the payment rails ·
-`tests/unit/` · `scripts/` stack, demo, walkthrough, rehearsal and reset · `templates/` the
-Switch Console template · `docs/` the landing page and the clips.

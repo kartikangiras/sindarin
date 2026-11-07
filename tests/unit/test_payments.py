@@ -396,3 +396,21 @@ def test_increase_in_production_refuses_a_short_balance_and_unknown_vendors(tmp_
         out["INV-1042"].status == "failed" and "no bank account on file" in out["INV-1042"].detail
     )
     assert "simulations" not in " ".join(fake.calls)
+
+
+def test_the_books_id_namespaces_the_keys_and_changes_on_reset(tmp_path):
+    from sindarin.adapters.ledger import LedgerAdapter
+
+    books = Ledger(tmp_path / "books.db")
+    books.import_dir(SAMPLE)
+    first = books.books_id()
+    assert len(first) == 10 and books.books_id() == first
+    fake = _Stripe(balance=10_000_00, status="paid")
+    rail = StripeRail("sk_test_x", transport=httpx.MockTransport(fake))
+    LedgerAdapter(books, rail=rail)
+    assert rail.key_ns == first
+    rail.send("PAY-1", LINES[:1])
+    assert fake.keys == [f"sindarin-{first}-PAY-1-INV-1042"]
+    books.reset(SAMPLE)
+    assert books.books_id() != first
+    books.close()

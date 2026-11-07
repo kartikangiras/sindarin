@@ -19,12 +19,12 @@ status_fences: false
 ledger_db: books.db
 data_dir: ../data/acme
 sheet_url: ''
-payment_rail: file
+payment_rail: increase
 payment_env: sandbox
 payments_dir: payments
-invoicing: 'off'
-crm: 'off'
-esign: 'off'
+invoicing: stripe
+crm: hubspot
+esign: dropbox_sign
 board_pack: 'off'
 vendor_banks: {}
 increase_entity_id: ''

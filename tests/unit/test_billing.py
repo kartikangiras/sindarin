@@ -91,8 +91,8 @@ def test_an_invoice_is_created_finalized_and_read_back():
     assert fake.customers["cus_1"]["name"] == "Contoso Ltd"
     assert fake.customers["cus_1"]["email"] == "billing+contoso-ltd@example.com"
     assert fake.items[0]["amount"] == "1020000" and fake.items[0]["currency"] == "usd"
-    assert fake.keys == [
-        "sindarin-customer-contoso-ltd-v2",
+    assert fake.keys[0].startswith("sindarin-customer-contoso-ltd-") and len(fake.keys[0]) == 38
+    assert fake.keys[1:] == [
         "sindarin-D-2026-01-invoice-v2",
         "sindarin-D-2026-01-item-v2",
         "sindarin-D-2026-01-finalize-v2",

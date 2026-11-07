@@ -151,7 +151,7 @@ def test_the_board_pack_on_demand_and_when_the_month_locks(harness: Harness):
     ]
     assert pack.built == [("2026-10", 3, 4)]  # three charts, four tables with rows
     fx = h.command("p2", "pack 2027-01", sender=JOHN, room=FINANCE, executor=SWITCH_EXECUTOR)
-    assert _texts(fx) == ["**pack 2027-01** — the ledger has no period 2027-01."]
+    assert _texts(fx)[0].startswith("**pack 2027-01** — the ledger has no period 2027-01 yet")
     fx = h.command(
         "p3",
         "pack 2026-10",

@@ -113,9 +113,10 @@ def test_commands_render_through_sindarin_switch(harness: Harness):
     fx = h.command(
         "r8", "chart 2027-01 revenue", sender=JOHN, room=FINANCE, executor=SWITCH_EXECUTOR
     )
-    assert [e.text for e in fx if isinstance(e, core.Post)] == [
-        "**chart 2027-01** — the ledger has no period 2027-01."
-    ]
+    texts = [e.text for e in fx if isinstance(e, core.Post)]
+    assert len(texts) == 1 and texts[0].startswith(
+        "**chart 2027-01** — the ledger has no period 2027-01 yet; it holds 2026-10"
+    )
     h.switch.ledger.close()
 
 

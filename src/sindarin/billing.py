@@ -40,6 +40,7 @@ class StripeBilling:
         # Stripe sends an invoice only to a customer with an email; the billing contact for
         # every account in the demo, or, in test mode, an address made from the account's name
         self.customer_email = customer_email
+        self.key_ns = ""  # the books id, set by the adapter: keys are new after a reset
         self._http = httpx.Client(
             base_url=STRIPE_API, auth=(secret_key, ""), timeout=20.0, transport=transport
         )
@@ -64,6 +65,9 @@ class StripeBilling:
             raise StripeRefusal(code, str(err.get("message") or "")[:160])
         return body
 
+    def _key(self, *parts: str) -> str:
+        return "-".join(("sindarin", *([self.key_ns] if self.key_ns else []), *parts))
+
     def email_for(self, account: str) -> str:
         if self.customer_email:
             return self.customer_email
@@ -72,16 +76,18 @@ class StripeBilling:
         raise RailError(f"Stripe: no billing email for {account}; set BILLING_CUSTOMER_EMAIL")
 
     def customer(self, account: str) -> str:
-        """The customer for an account, created once (the idempotency key is the account)."""
+        """The customer for an account, created once per account and billing address: the key
+        carries both, so the same request replays as the same customer and a new address makes
+        a new one rather than tripping Stripe's same-key-different-parameters refusal."""
+        import hashlib
+
+        email = self.email_for(account)
+        stamp = hashlib.sha256(f"{account}|{email}".encode()).hexdigest()[:8]
         made = self._call(
             "POST",
             "/v1/customers",
-            data={
-                "name": account[:256],
-                "email": self.email_for(account),
-                "metadata[account]": account[:200],
-            },
-            key=f"sindarin-customer-{_slug(account)}-v2",
+            data={"name": account[:256], "email": email, "metadata[account]": account[:200]},
+            key=self._key("customer", _slug(account), stamp),
         )
         return str(made["id"])
 
@@ -111,7 +117,7 @@ class StripeBilling:
                 "metadata[period]": period,
                 "pending_invoice_items_behavior": "exclude",
             },
-            key=f"sindarin-{deal_id}-invoice-v2",
+            key=self._key(deal_id, "invoice-v2"),
         )
         self._call(
             "POST",
@@ -124,11 +130,11 @@ class StripeBilling:
                 "description": f"{product} · {deal_id}"[:500],
                 "metadata[deal]": deal_id,
             },
-            key=f"sindarin-{deal_id}-item-v2",
+            key=self._key(deal_id, "item-v2"),
         )
         invoice_id = str(created["id"])
         final = self._call(
-            "POST", f"/v1/invoices/{invoice_id}/finalize", key=f"sindarin-{deal_id}-finalize-v2"
+            "POST", f"/v1/invoices/{invoice_id}/finalize", key=self._key(deal_id, "finalize-v2")
         )
         seen = self._call("GET", f"/v1/invoices/{invoice_id}")
         meta = seen.get("metadata") or {}

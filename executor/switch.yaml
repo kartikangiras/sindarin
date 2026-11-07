@@ -19,6 +19,15 @@ status_fences: false
 ledger_db: books.db
 data_dir: ../data/acme
 sheet_url: ''
+payment_rail: file
+payment_env: sandbox
+payments_dir: payments
+invoicing: 'off'
+crm: 'off'
+esign: 'off'
+board_pack: 'off'
+vendor_banks: {}
+increase_entity_id: ''
 room_creation: gateway
 addressing: rooms
 bridge_id: b76af5d9-670f-4573-9f7b-6655cdb00753

@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS deals(
   id TEXT PRIMARY KEY, account TEXT NOT NULL, product TEXT NOT NULL, list_cents INTEGER NOT NULL,
   price_cents INTEGER NOT NULL, discount_bps INTEGER NOT NULL, terms TEXT NOT NULL,
   period TEXT NOT NULL, stage TEXT NOT NULL, source TEXT NOT NULL, won_at TEXT);
+CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS planned(
   period TEXT NOT NULL, department TEXT NOT NULL, account TEXT NOT NULL,
   amount_cents INTEGER NOT NULL, source TEXT NOT NULL, posted_at TEXT NOT NULL,
@@ -134,6 +135,23 @@ class Ledger:
 
     def close(self) -> None:
         self._db.close()
+
+    def books_id(self) -> str:
+        """A short id for this set of books, made once and rotated when the books are cleared.
+        The rails and the biller put it in their idempotency keys, so a run id that comes round
+        again after a reset (PAY-1, D-2026-01) is new to them, while a replay of the same run
+        against the same books is not."""
+        row = self._db.execute("SELECT value FROM meta WHERE key='books_id'").fetchone()
+        if row:
+            return str(row["value"])
+        if self.readonly:
+            return ""
+        import uuid
+
+        made = uuid.uuid4().hex[:10]
+        self._db.execute("INSERT INTO meta(key, value) VALUES ('books_id', ?)", (made,))
+        self._db.commit()
+        return made
 
     # -- import --------------------------------------------------------------------------------
 
@@ -260,16 +278,14 @@ class Ledger:
         return {"counts": counts, "skipped": skipped, "periods": touched}
 
     def reset(self, folder: str | Path) -> dict[str, int]:
-        self._check_write()
-        for table in _TABLES:
-            self._db.execute(f"DELETE FROM {table}")
-        self._db.commit()
+        self.clear()
         return self.import_dir(folder)
 
     def clear(self) -> None:
         self._check_write()
         for table in _TABLES:
             self._db.execute(f"DELETE FROM {table}")
+        self._db.execute("DELETE FROM meta WHERE key='books_id'")  # fresh books, fresh keys
         self._db.commit()
 
     # -- reads ---------------------------------------------------------------------------------

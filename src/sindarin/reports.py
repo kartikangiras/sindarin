@@ -35,7 +35,11 @@ class ReportError(Exception):
 
 def _summary(ledger: Ledger, period: str) -> dict[str, Any]:
     if period not in ledger.periods():
-        raise ReportError(f"the ledger has no period {period}")
+        held = ", ".join(ledger.periods()) or "no period at all"
+        raise ReportError(
+            f"the ledger has no period {period} yet; it holds {held}. A month exists once it is "
+            "planned or has rows"
+        )
     return ledger.summary(period)
 
 
