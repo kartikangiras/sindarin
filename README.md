@@ -110,7 +110,7 @@ Discount limit 1,000.00 USD: controllers below it, the CFO above.
 |---|---|---|---|
 | `DEAL-1` | cfo, controllers under the discount limit | `@sindarin-ledger approve DEAL-1` | deal won, the sale lands in the open month |
 | price | any person | `@sindarin-ledger price Team 12500.00` | moves the list price under a pending deal |
-| chart | anyone | `@sindarin-switch chart 2026-11 deals` | the month's deals as a PNG in the room |
+| chart | anyone | `@sindarin-switch chart 2026-11 deals` | the month's deals as a chart in the thread, with a one-line reading |
 
 The list price comes from the ledger's price book, never from the agent. A fence that claims
 another list price is refused before anyone is asked; a locked month takes no deal.
@@ -309,9 +309,9 @@ display-name mention as not addressed and the executor ignores it.
 
 | Reading command | What happens | Answered by |
 |---|---|---|
-| `report <period>` | the month against its targets, the budget, the planned amounts, budget against actual, with the charts attached as PNGs | `sindarin-switch` |
+| `report <period>` | the month against its targets, the budget, the planned amounts, budget against actual, then each of the month's charts inline in the thread | `sindarin-switch` |
 | `export <period> sales\|payables\|budget\|planned\|targets\|deals\|journal\|audit` | the table as a CSV file in the room | `sindarin-switch` |
-| `chart <period> revenue\|budget\|costs\|target\|deals` | a bar chart PNG in the room | `sindarin-switch` |
+| `chart <period> revenue\|budget\|costs\|target\|deals` | an annotated chart inline in the thread (title, target or cap marked, the total against it) with a one-line reading after it | `sindarin-switch` |
 | `read <link> [tab]` | any Google Sheet, Drive file, .xlsx or .csv: every tab, totals, date ranges, repeated invoices, missing columns, and whether the books can take it; with a tab, its rows | `sindarin-switch` |
 | `audit <id>\|<period>` | the trail, event by event, with the participant id behind each one | the owner; a month in `#acme-finance` covers both |
 | `who approves [<kind>]` | the group, the limit and the names, from the policy | either |

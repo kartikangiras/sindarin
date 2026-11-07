@@ -362,7 +362,7 @@ const CHAINS = [
     steps: [
       ["DEAL", "cfo · controllers under the discount limit", "@sindarin-ledger approve DEAL-1", "deal won, the sale lands in the open month"],
       ["price", "any person", "@sindarin-ledger price Team 12500.00", "moves the list price under a pending deal"],
-      ["chart", "anyone", "@sindarin-switch chart 2026-11 deals", "the month's deals as a PNG in the room"],
+      ["chart", "anyone", "@sindarin-switch chart 2026-11 deals", "the month's deals as a chart in the thread, with a one-line reading"],
     ],
     moment: "The list price comes from the ledger's price book, never from the agent. A fence that claims another list price is refused before anyone is asked; a locked month takes no deal.",
   },
@@ -496,9 +496,9 @@ const COMMANDS = [
     who: "from any room, read-only, from the ledger",
     cols: ["Command", "What happens", "Answered by"],
     rows: [
-      ["report <period>", "The month against its targets, the recorded budget, the planned amounts, budget against actual once both exist, with the month's charts attached as PNGs.", "sindarin-switch"],
+      ["report <period>", "The month against its targets, the recorded budget, the planned amounts, budget against actual once both exist, then each of the month's charts inline in the thread.", "sindarin-switch"],
       ["export <period> sales|payables|budget|planned|targets|deals|journal", "The table as a CSV file in the room.", "sindarin-switch"],
-      ["chart <period> revenue|budget|costs|target|deals", "A bar chart PNG in the room; a text chart where files cannot be carried.", "sindarin-switch"],
+      ["chart <period> revenue|budget|costs|target|deals", "An annotated chart inline in the thread, the target or cap marked and the total against it, with a one-line reading after it; a text chart where files cannot be carried.", "sindarin-switch"],
       ["read <link> [tab]", "Any Google Sheet, Drive file, .xlsx or .csv: every tab, rows, columns, totals, date ranges, repeated invoices, missing columns, and whether the books can take it. With a tab name, its rows as a table plus the whole tab as a CSV.", "sindarin-switch"],
     ],
   },
@@ -695,7 +695,7 @@ const DEMO = [
   ["#sales", "@sales deal Contoso Ltd on Team at 10,200.00", "Priced from the price book: Team lists at 12,000.00, so the discount needs the CFO. DEAL-1 is proposed."],
   ["", "@sindarin-ledger price Team 12500.00", "The list price moves under the pending deal: the books move."],
   ["", "@sindarin-ledger approve DEAL-1", "Refused with both prices; re-proposed at the new discount. Approve again: won, the sale is in November."],
-  ["anywhere", "@sindarin-switch report 2026-11", "The month against its targets, the budget and the planned amounts, with the charts attached as PNGs."],
+  ["anywhere", "@sindarin-switch report 2026-11", "The month against its targets, the budget and the planned amounts, then each chart inline in the thread."],
 ];
 
 const DEMO_MORE = [
