@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" role="img" aria-label="Sindarin">
+  <rect width="128" height="128" rx="28" fill="#0a0a0b"/>
+  <g transform="translate(22 22) scale(2.625)" fill="none" stroke="#ffffff" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M7 29V15a9 9 0 0 1 18 0v14"/>
+    <path d="M4 29h24"/>
+    <path d="M11 29V17a5 5 0 0 1 10 0v12"/>
+    <path d="M8 20h16"/>
+  </g>
+</svg>

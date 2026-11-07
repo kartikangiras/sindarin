@@ -227,6 +227,7 @@ ROOMS: dict[str, RoomSpec] = {
     ),
 }
 PROBE_ROOM = "sindarin-ids"  # private, all five agents and the people; never in the demo
+EXECUTOR_ICON_URL = "https://sindarin-nu.vercel.app/brand/icon.svg"  # the door mark
 
 
 @dataclass
@@ -924,8 +925,9 @@ def run_bootstrap(
 
 
 def _switch_extras(admin: GatewayClient, rep: Report) -> None:
-    """The Switch components around the demo, fail-soft: the rooms in one room group, and a
-    usage budget on every LLM agent (Switch's own cap, beside the gates)."""
+    """The Switch components around the demo, fail-soft: the rooms in one room group, a usage
+    budget on every LLM agent (Switch's own cap, beside the gates), and the door mark as the
+    executors' icon, so they are recognisable in the Console, the Gateway and the chat."""
     try:
         gid = admin.ensure_room_group(
             "Acme finance", "Sindarin: the finance rooms and the rooms it opens"
@@ -958,6 +960,19 @@ def _switch_extras(admin: GatewayClient, rep: Report) -> None:
             f"budgets: {budgets + len(capped)} agents capped at 200,000 output tokens a day "
             "by Switch"
         )
+    icons = 0
+    for handle in (SWITCH_EXECUTOR, LEDGER_EXECUTOR):
+        a = rep.agents.get(handle)
+        if not a:
+            continue
+        try:
+            admin.set_agent_icon(a["id"], EXECUTOR_ICON_URL)
+            icons += 1
+        except GatewayError as exc:
+            rep.say(f"icon {handle}: not set ({str(exc)[:80]})")
+            break
+    if icons:
+        rep.say(f"icons: the door mark on {icons} executors")
 
 
 def _set_addressing(admin: GatewayClient, rep: Report, mode: str) -> None:

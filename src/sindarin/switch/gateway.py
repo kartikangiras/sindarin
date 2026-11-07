@@ -308,6 +308,11 @@ class GatewayClient:
         data = self._req("GET", "/gateway/tenants/current")
         return str(data.get("id", ""))
 
+    def set_agent_icon(self, agent_id: str, icon_url: str | None) -> dict[str, Any]:
+        """The icon Switch shows for an agent in the Console, the Gateway and, where a bridge
+        carries avatars, the chat. An absolute https URL off the local network; None clears it."""
+        return self._req("PUT", f"/gateway/agents/{agent_id}/icon", json={"icon_url": icon_url})
+
     def budgets(self) -> list[dict[str, Any]]:
         tenant = self.current_tenant_id()
         data = self._req("GET", f"/gateway/tenants/{tenant}/budgets")
