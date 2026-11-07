@@ -99,6 +99,10 @@ def parse_money(text: str) -> int:
     return whole * 100 + int(m.group(2) or 0)
 
 
+REPORT_LINE = 160  # schema.GoalsBody / CloseBody: each report line is 1-160 characters
+REPORT_IDS = 3  # duplicate invoice ids named before "and N more"
+
+
 def report_lines(s: dict[str, Any], currency: str = "USD") -> list[str]:
     """The month in a handful of lines: what the goals carry as their basis."""
     top = list(s["by_customer"].items())[:3]
@@ -121,10 +125,14 @@ def report_lines(s: dict[str, Any], currency: str = "USD") -> list[str]:
         f"Open payables {money(sum(p['amount_cents'] for p in open_rows), currency)} "
         f"({len(open_rows)} invoices)",
     ]
-    if s["duplicate_invoices"]:
-        dup = ", ".join(s["duplicate_invoices"])
-        lines.append(f"Duplicate sales rows excluded from revenue: {dup}")
-    return lines
+    dups = list(s["duplicate_invoices"])
+    if dups:
+        shown = ", ".join(dups[:REPORT_IDS])
+        more = f" and {len(dups) - REPORT_IDS} more" if len(dups) > REPORT_IDS else ""
+        lines.append(f"Duplicate sales rows excluded from revenue: {shown}{more}")
+    # GoalsBody/CloseBody take report lines of at most REPORT_LINE characters each; a month with
+    # long customer names or a dirty import must still produce a proposal, not a dead end.
+    return [ln if len(ln) <= REPORT_LINE else ln[: REPORT_LINE - 1] + "…" for ln in lines]
 
 
 def render_report(s: dict[str, Any], currency: str = "USD") -> str:

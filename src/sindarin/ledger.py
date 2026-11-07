@@ -153,7 +153,12 @@ class Ledger:
                 (str(row["code"]).strip(), str(row["name"]).strip(), str(row["type"]).strip()),
             )
             counts["accounts"] += 1
-        for row in tabs.get("sales", []):
+        sales_rows = list(tabs.get("sales", []))
+        # The file is the record: its sales replace the months it covers, so importing the same
+        # file twice (demo.sh over a loaded ledger, 2026-11-07) cannot double every invoice.
+        for period in sorted({period_of(_date(r["date"])) for r in sales_rows}):
+            self._drop_sales(period)
+        for row in sales_rows:
             self._sale(
                 str(row["invoice"]).strip(),
                 _date(row["date"]),
@@ -225,13 +230,7 @@ class Ledger:
         try:
             if "sales" in tabs:
                 for p in [p for p in self.periods() if p not in locked]:
-                    self._db.execute(
-                        "DELETE FROM lines WHERE journal_id IN "
-                        "(SELECT id FROM journal WHERE source='sales' AND period=?)",
-                        (p,),
-                    )
-                    self._db.execute("DELETE FROM journal WHERE source='sales' AND period=?", (p,))
-                    self._db.execute("DELETE FROM sales WHERE period=?", (p,))
+                    self._drop_sales(p)
             if "payables" in tabs:
                 self._db.execute("DELETE FROM payables WHERE status='open'")
             rest = {k: v for k, v in tabs.items() if k not in ("sales", "payables")}
@@ -763,6 +762,16 @@ class Ledger:
 
     def _ensure_period(self, period: str) -> None:
         self._db.execute("INSERT OR IGNORE INTO periods(period) VALUES (?)", (period,))
+
+    def _drop_sales(self, period: str) -> None:
+        """Remove a month's sales rows and the journal entries they posted."""
+        self._db.execute(
+            "DELETE FROM lines WHERE journal_id IN "
+            "(SELECT id FROM journal WHERE source='sales' AND period=?)",
+            (period,),
+        )
+        self._db.execute("DELETE FROM journal WHERE source='sales' AND period=?", (period,))
+        self._db.execute("DELETE FROM sales WHERE period=?", (period,))
 
     def _sale(self, invoice: str, date: str, customer: str, amount_cents: int) -> None:
         period = period_of(date)
