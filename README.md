@@ -6,7 +6,9 @@
 </picture>
 
 **A company's finance month, run from chat on Switch. Agents draft, the right people approve,
-deterministic executors move the books.** Landing page:
+deterministic executors move the books and reach the tools the team already uses: vendors paid
+by ACH, the customer invoiced through Stripe, the deal closed in HubSpot, the order form signed
+through Dropbox Sign.** Landing page:
 [sindarin-nu.vercel.app](https://sindarin-nu.vercel.app).
 
 ## The month, run from chat
@@ -24,11 +26,14 @@ plan   ask → analyst reports the month, planner proposes the goals ──[CFO]
            → bookkeeper proposes the register entries ──[controller]──► period planned → business told
 
 close  ask → analyst reports the month, bookkeeper proposes the plan ──[controller]──► period room opens
-           → treasury proposes the payment run ──[CFO; controller under the limit]──► payables paid
+           → treasury proposes the payment run ──[CFO; controller under the limit]──► paid by ACH (Increase),
+             or sent as a bank file that a person confirms ──[CFO or controller]──► payables paid
            → bookkeeper proposes the entries and the lock ──[controller]──► period locked → business told
 
-sales  ask → sales prices the deal from the price book ──[CFO; controller under the discount limit]──► deal won,
-             the sale lands in the open month, finance is told
+sales  ask → sales prices the deal from the price book, HubSpot gets the deal
+           ──[CFO; controller under the discount limit]──► deal won, the sale lands in the open month,
+             the Stripe invoice goes to the customer, the order form goes out for signature, finance is told
+           → the customer signs and pays ──[Dropbox Sign, Stripe]──► signature announced, receipt booked
 ```
 
 The agents hold no credential that can change anything; every number they post comes from a
@@ -94,8 +99,9 @@ Ask `@analyst @bookkeeper close October` in `#acme-finance`. Rooms: `#acme-finan
 | Gate | Who approves | Command | Result |
 |---|---|---|---|
 | `CLOSE-1` | controllers | `@sindarin-switch approve CLOSE-1` | opens the period room |
-| `PAY-1` | cfo, controllers under the limit | `@sindarin-ledger approve PAY-1` | payables paid, verified by read-back |
-| `LOCK-1` | controllers | `@sindarin-ledger approve LOCK-1` | entries posted, debits equal credits, period locked |
+| `PAY-1` | cfo, controllers under the limit | `@sindarin-ledger approve PAY-1` | run sent to the payment rail: the bank file in the thread, or Stripe payouts read back |
+| `PAY-1` paid | cfo or controllers | `@sindarin-ledger paid PAY-1 <bank reference>` | payables paid and booked under the reference; on Stripe the executor confirms by polling |
+| `LOCK-1` | controllers | `@sindarin-ledger approve LOCK-1` | entries posted, debits equal credits, period locked; with Drive connected the month's board pack (report, charts, exports, a Slides deck) lands in the shared folder and the links in the thread |
 
 A payable amended under a pending run refuses the stale approval with both amounts. A run naming
 an invoice outside the approved plan is refused before anyone is asked. Plan first, then close: a
@@ -104,11 +110,15 @@ locked month takes no late sale.
 ### Win a deal
 
 Ask `@sales deal Contoso Ltd on Team at 10,200.00` in `#sales`; `#acme-finance` is told once.
-Discount limit 1,000.00 USD: controllers below it, the CFO above.
+Discount limit 1,000.00 USD: controllers below it, the CFO above. With the connectors on, the
+proposal creates the deal in HubSpot at an open stage, the approval closes it won, sends a
+Stripe invoice to the customer and the order form to the signer through Dropbox Sign, and the
+executor keeps watching both: the signature is announced when it lands, the receipt is booked
+when the invoice is paid. A denial closes the HubSpot deal lost.
 
 | Gate | Who approves | Command | Result |
 |---|---|---|---|
-| `DEAL-1` | cfo, controllers under the discount limit | `@sindarin-ledger approve DEAL-1` | deal won, the sale lands in the open month |
+| `DEAL-1` | cfo, controllers under the discount limit | `@sindarin-ledger approve DEAL-1` | deal won, the sale lands in the open month; with the connectors on, the HubSpot deal closes won, the order form goes out through Dropbox Sign, and a Stripe invoice goes to the customer with the receipt booked when they pay |
 | price | any person | `@sindarin-ledger price Team 12500.00` | moves the list price under a pending deal |
 | chart | anyone | `@sindarin-switch chart 2026-11 deals` | the month's deals as a chart in the thread, with a one-line reading |
 
@@ -161,7 +171,9 @@ so every gate, refusal and report still happens.
 
 ### The ten-minute demo
 
-The sample month, you as every approver.
+The sample month, you as every approver. `demo.sh` pays runs through a free Increase sandbox
+when it can reach one and through the bank file otherwise; the HubSpot, Stripe and Dropbox Sign
+lines appear once their keys are in `.env` (steps 6 and 7 below).
 
 ```bash
 git clone https://github.com/kartikangiras/sindarin && cd sindarin
@@ -185,12 +197,14 @@ and is ignored. Then type, in order:
 | `#plan-2026-11` | `@sindarin-ledger approve ENTRIES-1` | entries posted, period planned, the business told |
 | `#acme-finance` | `@analyst @bookkeeper close October` | the bookkeeper proposes `CLOSE-1` |
 | | `@sindarin-switch approve CLOSE-1` | `#close-2026-10` opens; in `#payments` treasury proposes `PAY-1` |
-| `#payments` | `@sindarin-ledger approve PAY-1` | three payables paid, verified; the bookkeeper proposes `LOCK-1` |
+| `#payments` | `@sindarin-ledger approve PAY-1` | three ACH transfers leave the Increase sandbox account, each read back: paid via Increase, operating balance after; the bookkeeper proposes `LOCK-1`. On the bank-file rail the batch lands in the thread instead and you confirm with `@sindarin-ledger paid PAY-1 BANK-7781` |
 | `#close-2026-10` | `@sindarin-ledger approve LOCK-1` | entries posted, period locked |
-| `#sales` | `@sales deal Contoso Ltd on Team at 10,200.00` | priced from the price book; `DEAL-1` needs the CFO |
+| `#sales` | `@sales deal Contoso Ltd on Team at 10,200.00` | priced from the price book; `DEAL-1` needs the CFO; the deal is created in HubSpot at an open stage, link in the thread |
 | | `@sindarin-ledger price Team 12500.00` | the books move |
-| | `@sindarin-ledger approve DEAL-1` | refused with both prices; re-proposed; approve again: won |
-| anywhere | `@sindarin-switch report 2026-11` | the month with its charts attached |
+| | `@sindarin-ledger approve DEAL-1` | refused with both prices; re-proposed; approve again: won, the Stripe invoice link in the thread, the HubSpot deal closed won, the order form in the signer's inbox |
+| your inbox | sign the order form | within a minute the thread says who signed and when |
+| the invoice link | pay with `4242 4242 4242 4242` | within a minute the thread says the customer paid; the receipt is booked, cash up, receivables down |
+| anywhere | `@sindarin-switch report 2026-11` | the month, then each chart inline in the thread |
 
 ```bash
 uv run python scripts/walkthrough.py   # the same script, typed for you, with the timing of a demo
@@ -198,7 +212,7 @@ PEOPLE=cast scripts/demo.sh            # adds a four-person team: CFO, controlle
 uv run python scripts/rehearse.py --chain plan   # plays that team through a chain, refusals included
 scripts/reset_demo.sh --rooms          # back to the start: executor state, the ledger, the opened rooms
 scripts/demo.sh stop                   # stops the seven processes; Switch keeps running
-uv run pytest                          # 197 tests, eleven of them adversarial
+uv run pytest                          # 219 tests, twelve of them adversarial
 ```
 
 ### Your team, your books
@@ -273,7 +287,80 @@ uv run sindarin people remove alice
 
 In chat, `@sindarin-switch whoami` shows the id the policy names and the groups it is in.
 
-**6. See it in Switch.** In the Switch Console choose *Add a server* → *Connect to an existing
+**6. Choose how runs are paid.** An approved payment run is sent, not paid. By default the
+ledger executor writes the run as a bank CSV batch, `executor/payments/PAY-n.csv`, posts it in
+the thread for the treasury to upload to the bank portal, and a person in the run's approver
+groups confirms the bank's word with `@sindarin-ledger paid PAY-n <bank reference>`; only then
+are the payables booked and the month allowed to lock. With a Stripe key the executor pays
+through Stripe instead: one payout per payable with `sindarin-<run>-<invoice>` as the
+idempotency key, each read back before it counts as sent, and polled until Stripe says paid.
+Test mode (`sk_test_…`) tops up an empty balance with a test charge, so the whole loop runs
+without real money, but payouts need a bank account on the Stripe account, added once in the
+dashboard, and some dashboards outside the US refuse Stripe's test bank numbers. When that
+happens, use Increase below for payments and keep Stripe for the invoices.
+
+The third rail needs no account at all. `sindarin rail increase` provisions a free Increase
+sandbox with one unauthenticated call, writes the key to `.env`, and from then on an approved
+run opens an operating account on first use, funds it, creates an External Account per vendor
+and sends one ACH transfer per payable with `sindarin-<run>-<invoice>` as the idempotency key.
+The available balance is read before anything goes out, every transfer is read back and
+compared, settlement is simulated by the sandbox, and the room is told the operating balance
+after the run. In production the same code refuses a run the balance cannot cover and a
+vendor with no bank account on file (`vendor_banks` in `executor/ledger.yaml`). `demo.sh`
+picks this rail when the sandbox is reachable and falls back to the bank file otherwise.
+
+```bash
+uv run sindarin rail increase          # a free sandbox, the key into .env, the rail set
+uv run sindarin rail stripe            # after STRIPE_SECRET_KEY=sk_test_… is in .env
+uv run sindarin rail file              # the bank file a person confirms (the default)
+uv run sindarin invoicing stripe       # a won deal becomes a Stripe invoice; off by default
+```
+
+Money in works the same way. With `invoicing: stripe` and the Stripe key, a won deal finds or
+creates the customer, adds the deal as an invoice item, creates and finalizes an invoice with
+the deal id in its metadata, reads it back, and posts the hosted invoice link in `#sales`. The
+executor polls the invoice until Stripe says paid, then books the receipt: cash up, receivables
+down, the sale marked collected under the invoice id. In test mode a test card pays the hosted
+page (4242 4242 4242 4242, any future date, any CVC), so a judge can watch a deal go from
+approval to cash without real money. Invoices are addressed to `BILLING_CUSTOMER_EMAIL`, or to
+the Dropbox Sign signer when that is empty.
+
+**7. Connect the tools the team already uses.** Each is one key in `.env` and one command, and
+each is off until you turn it on. The executors hold the keys; agents never see them.
+
+```bash
+uv run sindarin connect hubspot        # HUBSPOT_TOKEN: a proposed deal is created in the CRM,
+                                       # the CFO's yes closes it won, a deny closes it lost
+uv run sindarin connect dropbox-sign   # DROPBOX_SIGN_API_KEY + DROPBOX_SIGN_SIGNER_EMAIL: the
+                                       # order form goes out for signature when a deal is approved
+uv run sindarin connect drive          # SINDARIN_GOOGLE_SA + GOOGLE_DRIVE_FOLDER_ID: a locked
+                                       # month's board pack lands in Drive and Slides
+uv run sindarin connect hubspot --off
+```
+
+HubSpot: a free developer test account and a private-app token. The deal is created at an open
+stage with its company when the sales agent proposes it, read back, and moved to closed won at
+the approved amount or to closed lost. Dropbox Sign: a free account, test mode, so requests are
+watermarked and never binding; the ledger executor renders the order form from the approved
+deal, sends it to the signer you name, and polls the request until it is signed or declined.
+Google, two ways. With a service-account key: share a Drive folder with the account's email as
+editor and point `SINDARIN_GOOGLE_SA` at the key. Without one, which is what an organisation
+policy that disables service-account keys leaves you: sign in as yourself once with the gcloud
+CLI and the pack lands in your own Drive, no sharing needed.
+
+```bash
+brew install --cask google-cloud-sdk        # the gcloud CLI, once
+gcloud auth login && gcloud config set project <your-project-id>
+gcloud services enable drive.googleapis.com slides.googleapis.com
+gcloud auth application-default login \
+  --scopes=https://www.googleapis.com/auth/drive,https://www.googleapis.com/auth/presentations,https://www.googleapis.com/auth/cloud-platform
+# .env: GOOGLE_DRIVE_FOLDER_ID=<the id in the folder's URL>
+uv run sindarin connect drive               # prints the Google account it signed in as
+```
+
+The pack is also built on demand with `pack <period>`.
+
+**8. See it in Switch.** In the Switch Console choose *Add a server* → *Connect to an existing
 server*, enter `http://localhost:8000`, and sign in as the Gateway admin. *Your Rooms* shows the
 four rooms with their agents, the "Acme finance" group and the documents a chain attaches. The
 Gateway at http://127.0.0.1:3000, same sign-in, lists the seven agents, the rooms and the
@@ -306,6 +393,7 @@ display-name mention as not addressed and the executor ignores it.
 | `sale <invoice> <amount> <customer>` | a late sale lands in the newest month with sales | `sindarin-ledger` |
 | `price <product> <amount>` | edits a list price in the price book | `sindarin-ledger` |
 | `load <link>` | the team's file into the books; open rows replaced, paid payables and locked months kept | `sindarin-ledger` |
+| `paid <PAY-n> <reference>` | the bank has paid a sent run: by a person in the run's approver groups, in `#payments`; the payables become paid under the reference and the payments are booked | `sindarin-ledger` |
 
 | Reading command | What happens | Answered by |
 |---|---|---|
@@ -313,6 +401,7 @@ display-name mention as not addressed and the executor ignores it.
 | `export <period> sales\|payables\|budget\|planned\|targets\|deals\|journal\|audit` | the table as a CSV file in the room | `sindarin-switch` |
 | `chart <period> revenue\|budget\|costs\|target\|deals` | an annotated chart inline in the thread (title, target or cap marked, the total against it) with a one-line reading after it | `sindarin-switch` |
 | `read <link> [tab]` | any Google Sheet, Drive file, .xlsx or .csv: every tab, totals, date ranges, repeated invoices, missing columns, and whether the books can take it; with a tab, its rows | `sindarin-switch` |
+| `pack <period>` | the month's board pack: the report, its charts and every export into a Drive folder and a Slides deck, the links posted back; built on its own when a month locks | `sindarin-switch` |
 | `audit <id>\|<period>` | the trail, event by event, with the participant id behind each one | the owner; a month in `#acme-finance` covers both |
 | `who approves [<kind>]` | the group, the limit and the names, from the policy | either |
 
@@ -337,10 +426,17 @@ order on every `approve`:
   follows an approved plan and names only its payables, the lock a paid run.
 - State goes to SQLite before any write; every action is verified by read-back; one credential
   per executor.
+- **Payment.** An approved run is *sent*, not paid. The ledger executor hands it to its payment
+  rail: a bank CSV batch posted in the thread, which the treasury uploads to the bank portal
+  and a person in the approver groups confirms with `paid PAY-n <bank reference>`; one Stripe
+  payout per payable; or one ACH transfer per payable from an Increase operating account, the
+  balance read first. On every rail the key is `sindarin-<run>-<invoice>`, each transfer is read
+  back before it counts, and the status is polled until the rail says paid. Only a paid run
+  lets the period lock. Agents cannot confirm.
 
 ## Tests
 
-`uv run pytest` runs the unit tests and eleven adversarial tests. The adversarial tests drive the
+`uv run pytest` runs the unit tests and twelve adversarial tests. The adversarial tests drive the
 pure executor core with a real ledger file, a fake Gateway and a frozen clock, using events in
 Switch's real frame shape, and each writes a transcript to `validation/reports/`.
 
@@ -353,10 +449,11 @@ Switch's real frame shape, and each writes a transcript to `validation/reports/`
 | 5 | A late sale, typed from chat, lands between proposal and approval | refused with both revenues; snapshot replaced; re-proposal recorded |
 | 6 | `approve ENTRIES-1` in #planning, `approve BUDGET-1` in the plan room | room refusals; the period is planned only from its own room |
 | 7 | Goals pending past their TTL | `expired`, the planner told, no room opened |
-| 8 | A controller approves a payment run above the limit | refused with the amount and the limit; the CFO's yes pays; a small run is the controller's |
+| 8 | A controller approves a payment run above the limit | refused with the amount and the limit; the CFO's yes sends the run and the bank's confirmation pays it; a small run is the controller's |
 | 9 | A payable amended under a pending run; a run with an invoice outside the plan | the smuggled run refused; the stale yes refused with both amounts; the re-proposal paid |
 | 10 | A lock before the plan, before the run is paid, from the wrong room | each refused and named; the period locks only after its run, from its own room |
 | 11 | A deal at 15% off approved by a controller, by sales; a fence with its own list price; the price book edited under the pending deal; a deal into a locked month | refused with the discount and the limit; not in the group; the price book is the list price; both prices named and the re-proposal won; a locked month takes no deal |
+| 12 | `paid PAY-1` before the run is sent, by the treasury agent, by Vincent, from the period room, twice | each refused and named; the approved run is sent with its bank file and nothing booked; one confirmation by John books it under the reference and the lock follows |
 
 ## Repository
 
@@ -368,6 +465,6 @@ file, read and checked · `src/sindarin/people.py` colleagues into rooms and gro
 `src/sindarin/agents/` the five roles on the Anthropic SDK and their stand-ins ·
 `src/sindarin/switch/` the agent-protocol client and the Gateway client ·
 `agents/<role>/AGENT.md` the prompts, `agents/policy/` the groups and rules · `executor/` the two
-executor configs · `data/acme/` the sample month · `validation/` the eleven adversarial tests ·
+executor configs · `data/acme/` the sample month · `validation/` the twelve adversarial tests · `src/sindarin/payments.py` the payment rails ·
 `tests/unit/` · `scripts/` stack, demo, walkthrough, rehearsal and reset · `templates/` the
 Switch Console template · `docs/` the landing page and the clips.

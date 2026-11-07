@@ -13,7 +13,7 @@
 <meta property="og:image" content="https://sindarin-nu.vercel.app/brand/switch-map.jpg">
 <meta property="og:url" content="https://sindarin-nu.vercel.app/">
 <meta name="twitter:card" content="summary_large_image">
-<meta name="description" content="Agents propose, verified people approve, deterministic executors act. A finance management workflow built on Switch.">
+<meta name="description" content="Agents propose, verified people approve, deterministic executors act and reach the tools the team already uses. A finance management workflow built on Switch.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Instrument+Serif:ital@0;1&display=swap">
 <script src="https://cdn.tailwindcss.com/3.4.17"></script>
@@ -272,7 +272,7 @@ function Hero() {
           Corporate finance workflows,<br />run from your <span className="font-serif italic font-normal">chat.</span>
         </h1>
         <p className="text-[16px] text-gray-400 max-w-2xl text-center">
-          Sindarin runs a company's finance management inside Switch: the monthly plan, the month-end close and the sales deals. Agents draft every step from the books, the right people approve by Switch identity, deterministic executors move the ledger, and the team's own Google Sheet or Excel file is the record.
+          Sindarin runs a company's finance management inside Switch: the monthly plan, the month-end close and the sales deals. Agents draft every step from the books, the right people approve by Switch identity, deterministic executors move the ledger and the tools around it, the vendors paid by ACH, the customer invoiced through Stripe, the deal closed in HubSpot, the order form signed through Dropbox Sign, and the team's own Google Sheet or Excel file is the record.
         </p>
         <div className="flex flex-wrap items-center justify-center gap-3 mt-8">
           <PrimaryButton href="#run" onClick={go("run")}>Run it in ten minutes</PrimaryButton>
@@ -349,7 +349,8 @@ const CHAINS = [
     limit: "Payment limit 10,000.00 USD: controllers below it, the CFO above",
     steps: [
       ["CLOSE", "controllers", "@sindarin-switch approve CLOSE-1", "opens the period room"],
-      ["PAY", "cfo · controllers under the limit", "@sindarin-ledger approve PAY-1", "payables paid, verified by read-back"],
+      ["PAY", "cfo · controllers under the limit", "@sindarin-ledger approve PAY-1", "run sent to the payment rail: the bank file in the thread, or Stripe payouts read back"],
+      ["PAY paid", "cfo or controllers", "@sindarin-ledger paid PAY-1 <bank reference>", "payables paid and booked under the reference; on Stripe the executor confirms by polling"],
       ["LOCK", "controllers", "@sindarin-ledger approve LOCK-1", "entries posted, debits equal credits, period locked"],
     ],
     moment: "A payable amended under a pending run refuses the stale approval with both amounts. A run naming an invoice outside the approved plan is refused before anyone is asked.",
@@ -360,7 +361,7 @@ const CHAINS = [
     room: "#sales → #acme-finance is told once",
     limit: "Discount limit 1,000.00 USD: controllers below it, the CFO above",
     steps: [
-      ["DEAL", "cfo · controllers under the discount limit", "@sindarin-ledger approve DEAL-1", "deal won, the sale lands in the open month"],
+      ["DEAL", "cfo · controllers under the discount limit", "@sindarin-ledger approve DEAL-1", "deal won, the sale lands in the open month; with invoicing on, a Stripe invoice goes to the customer and the receipt is booked when paid"],
       ["price", "any person", "@sindarin-ledger price Team 12500.00", "moves the list price under a pending deal"],
       ["chart", "anyone", "@sindarin-switch chart 2026-11 deals", "the month's deals as a chart in the thread, with a one-line reading"],
     ],
@@ -489,6 +490,7 @@ const COMMANDS = [
       ["sale <invoice> <amount> <customer>", "A late sale lands in the newest month with sales. The next approval meets the changed ledger.", "sindarin-ledger"],
       ["price <product> <amount>", "Edits a list price in the price book, under a pending deal if you like.", "sindarin-ledger"],
       ["load <link>", "The team's file into the books, by someone in an approver group. Open rows are replaced; paid payables and locked months are kept and named.", "sindarin-ledger"],
+      ["paid <PAY-n> <reference>", "The bank has paid a sent run: a person in the run's approver groups, in #payments. The payables become paid under the reference and the payments are booked; with Stripe the executor confirms on its own.", "sindarin-ledger"],
     ],
   },
   {
@@ -499,6 +501,7 @@ const COMMANDS = [
       ["report <period>", "The month against its targets, the recorded budget, the planned amounts, budget against actual once both exist, then each of the month's charts inline in the thread.", "sindarin-switch"],
       ["export <period> sales|payables|budget|planned|targets|deals|journal", "The table as a CSV file in the room.", "sindarin-switch"],
       ["chart <period> revenue|budget|costs|target|deals", "An annotated chart inline in the thread, the target or cap marked and the total against it, with a one-line reading after it; a text chart where files cannot be carried.", "sindarin-switch"],
+      ["pack <period>", "The month's board pack: the report, its charts and every export into a Drive folder and a Slides deck, the links posted back. Built on its own when a month locks.", "sindarin-switch"],
       ["read <link> [tab]", "Any Google Sheet, Drive file, .xlsx or .csv: every tab, rows, columns, totals, date ranges, repeated invoices, missing columns, and whether the books can take it. With a tab name, its rows as a table plus the whole tab as a CSV.", "sindarin-switch"],
     ],
   },
@@ -516,7 +519,7 @@ const COMMANDS = [
       ["scripts/reset_demo.sh [--rooms]", "Wipes executor state, reloads the ledger, removes the rooms a run opened.", ""],
       ["uv run python scripts/rehearse.py --chain plan|close|sales", "Plays the four-person team through a chain against the live stack, refusals included.", ""],
       ["uv run sindarin people add <user> --groups cfo,controllers | list | remove", "A colleague into every room and the groups named; their participant id into the policy, which the executors reload on their own.", ""],
-      ["uv run pytest", "197 tests, eleven of them adversarial, each writing a transcript to validation/reports/.", ""],
+      ["uv run pytest", "219 tests, twelve of them adversarial, each writing a transcript to validation/reports/.", ""],
       ["uv run sindarin doctor", "Says what is missing, if anything is.", ""],
     ],
   },
@@ -593,6 +596,7 @@ const CHECKS = [
   ["A6", "The ledger is re-read. If it moved since the proposal, the approval is refused with both values, the snapshot replaced and the agent asked to propose again."],
   ["Order", "A budget follows approved goals, the entries a recorded budget, a payment run an approved plan naming only its payables, the lock a paid run. Stage lines are posted once."],
   ["State", "State goes to SQLite before any write; every action is verified by read-back, with one retry. One credential per executor; the agents open the ledger read-only."],
+  ["Payment", "An approved run is sent, not paid. The ledger executor hands it to its payment rail: a bank CSV batch a person confirms with paid PAY-n <reference>, Stripe payouts, or ACH transfers from an Increase operating account with the balance read first. Every transfer is keyed on the run and the invoice, read back before it counts, and polled until the rail says paid. Only a paid run lets the period lock; agents cannot confirm."],
 ];
 
 const TESTS = [
@@ -606,6 +610,7 @@ const TESTS = [
   ["A controller approves a payment run above the limit", "refused with the amount and the limit; the CFO's yes pays"],
   ["A payable amended under a pending run; a run with an invoice outside the plan", "the smuggled run refused; the stale yes refused with both amounts; the re-proposal paid"],
   ["A lock before the plan, before the run is paid, from the wrong room", "each refused and named; the period locks only after its run, from its own room"],
+  ["paid PAY-1 before the run is sent, by the treasury agent, by Vincent, from the period room, twice", "each refused and named; the approved run is sent with its bank file and nothing booked; one confirmation books it under the reference and the lock follows"],
   ["A deal at 15% off approved by a controller; a fence with its own list price; the price book edited under the pending deal", "refused with the discount and the limit; the price book is the list price; both prices named and the re-proposal won"],
 ];
 
@@ -690,11 +695,13 @@ const DEMO = [
   ["#plan-2026-11", "@sindarin-ledger approve ENTRIES-1", "Four register entries posted, the period is planned, the business is told in its thread."],
   ["#acme-finance", "@analyst @bookkeeper close October", "The analyst reports October; the bookkeeper proposes CLOSE-1: adjusting entries, the payables to pay, the total."],
   ["", "@sindarin-switch approve CLOSE-1", "The period room #close-2026-10 opens; in #payments treasury proposes PAY-1."],
-  ["#payments", "@sindarin-ledger approve PAY-1", "Three payables paid and verified by read-back; the bookkeeper proposes LOCK-1."],
-  ["#close-2026-10", "@sindarin-ledger approve LOCK-1", "Entries posted, debits equal credits, the period is locked."],
-  ["#sales", "@sales deal Contoso Ltd on Team at 10,200.00", "Priced from the price book: Team lists at 12,000.00, so the discount needs the CFO. DEAL-1 is proposed."],
+  ["#payments", "@sindarin-ledger approve PAY-1", "Three ACH transfers leave the Increase sandbox account, each read back: paid 14,250.00 USD via Increase, operating balance after. On the bank-file rail the batch lands in the thread instead and you confirm with paid PAY-1 BANK-7781."],
+  ["#close-2026-10", "@sindarin-ledger approve LOCK-1", "Entries posted, debits equal credits, the period is locked; with Drive connected the board pack follows."],
+  ["#sales", "@sales deal Contoso Ltd on Team at 10,200.00", "Priced from the price book: Team lists at 12,000.00, so the discount needs the CFO. DEAL-1 is proposed, and created in HubSpot at an open stage with its link in the thread."],
   ["", "@sindarin-ledger price Team 12500.00", "The list price moves under the pending deal: the books move."],
-  ["", "@sindarin-ledger approve DEAL-1", "Refused with both prices; re-proposed at the new discount. Approve again: won, the sale is in November."],
+  ["", "@sindarin-ledger approve DEAL-1", "Refused with both prices; re-proposed at the new discount. Approve again: won, the sale is in November, the Stripe invoice link is in the thread, the HubSpot deal is closed won, the order form is in the signer's inbox."],
+  ["your inbox", "sign the order form", "Within a minute the thread says who signed it and when (Dropbox Sign, test mode)."],
+  ["the invoice link", "pay with 4242 4242 4242 4242", "Within a minute the thread says the customer paid and the receipt is booked: cash up, receivables down."],
   ["anywhere", "@sindarin-switch report 2026-11", "The month against its targets, the budget and the planned amounts, then each chart inline in the thread."],
 ];
 
@@ -704,7 +711,7 @@ const DEMO_MORE = [
   ["uv run python scripts/rehearse.py --chain plan", "plays that team through a chain against the live stack, refusals included; also close and sales"],
   ["scripts/reset_demo.sh --rooms", "back to the start: executor state, the ledger, the rooms a run opened"],
   ["scripts/demo.sh stop", "stops the seven processes; Switch keeps running"],
-  ["uv run pytest", "197 tests, eleven of them adversarial, each writing a transcript to validation/reports/"],
+  ["uv run pytest", "219 tests, twelve of them adversarial, each writing a transcript to validation/reports/"],
 ];
 
 const TEAM_STEPS = [
@@ -762,6 +769,27 @@ const TEAM_STEPS = [
       ["uv run sindarin people remove alice", "out of the groups; the account stays"],
       ["@sindarin-switch whoami", "in chat: the participant id the policy names, and its groups"],
       ["budget 10,000.00 · payment run 10,000.00 · discount 1,000.00 USD", "the limits, in policy.yaml, yours to change"],
+    ],
+  },
+  {
+    title: "Choose how runs are paid",
+    text: "An approved payment run is sent, not paid. Three rails, one line to switch. The bank file: a CSV batch in the thread for the treasury to upload, confirmed by a person with the bank's reference. Stripe: one payout per payable in test mode. Increase: a free sandbox provisioned with no signup, an operating account opened and funded on first use, one ACH transfer per payable to an External Account per vendor, the balance read before anything goes out and reported after. Every rail keys each transfer on the run and the invoice, reads it back before it counts, and only a paid run lets the month lock.",
+    lines: [
+      ["uv run sindarin rail increase", "a free Increase sandbox, the key into .env, ACH transfers from then on; demo.sh does this"],
+      ["@sindarin-ledger paid PAY-1 <bank reference>", "in chat, on the bank-file rail: the bank has paid the batch"],
+      ["uv run sindarin rail stripe", "after STRIPE_SECRET_KEY=sk_test_… is in .env"],
+      ["vendor_banks: {Figma: \"021000021:123456789\"}", "in executor/ledger.yaml for Increase in production; the sandbox makes test accounts"],
+      ["uv run sindarin invoicing stripe", "money in: a won deal becomes a Stripe invoice the customer pays; the receipt is booked when Stripe says paid"],
+    ],
+  },
+  {
+    title: "Connect the tools the team already uses",
+    text: "Each is one key in .env and one command, and each is off until you turn it on. The executors hold the keys; agents never see them. HubSpot: a proposed deal is created in the CRM with its company, the CFO's yes closes it won at the approved amount, a deny closes it lost, every write read back. Dropbox Sign: the order form rendered from the approved deal goes to the signer you name, in test mode, and the room is told when it is signed. Google Drive and Slides: a locked month's board pack, the report, its charts, every export and a deck, lands in the folder you share with the service account, or on demand with pack <period>.",
+    lines: [
+      ["uv run sindarin connect hubspot", "HUBSPOT_TOKEN from a free developer test account's private app"],
+      ["uv run sindarin connect dropbox-sign", "DROPBOX_SIGN_API_KEY and DROPBOX_SIGN_SIGNER_EMAIL; test mode, watermarked, never binding"],
+      ["uv run sindarin connect drive", "GOOGLE_DRIVE_FOLDER_ID, with a service-account key or your own account through gcloud auth application-default login"],
+      ["@sindarin-switch pack 2026-10", "in chat: the board pack now, links back in the thread"],
     ],
   },
   {
@@ -978,7 +1006,7 @@ function Footer() {
         <span className="hidden md:inline">·</span>
         <span>Built on <a href="https://www.switchagents.ai/" target="_blank" rel="noopener" className="text-gray-300 hover:text-white">Switch</a></span>
         <span className="hidden md:inline">·</span>
-        <span>197 tests · 11 adversarial · 7 gates · 3 chains</span>
+        <span>219 tests · 12 adversarial · 8 gates · 3 chains</span>
       </div>
     </footer>
   );
