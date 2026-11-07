@@ -15,9 +15,10 @@ import os
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from sindarin.names import (
     ANALYST,
@@ -53,10 +54,25 @@ ROOT_ENV_KEYS: dict[str, tuple[str, ...]] = {
     PLANNER: ("ANTHROPIC_API_KEY",),
     TREASURY: ("ANTHROPIC_API_KEY",),
     SALES: ("ANTHROPIC_API_KEY",),
-    SWITCH_EXECUTOR: ("SWITCH_GATEWAY_URL", "SWITCH_GATEWAY_EMAIL", "SWITCH_GATEWAY_PASSWORD"),
+    SWITCH_EXECUTOR: (
+        "SWITCH_GATEWAY_URL",
+        "SWITCH_GATEWAY_EMAIL",
+        "SWITCH_GATEWAY_PASSWORD",
+        "SINDARIN_GOOGLE_SA",  # the board pack into Drive and Slides
+        "GOOGLE_DRIVE_FOLDER_ID",
+    ),
     # the ledger file is the credential; the Google service-account key (for the write-back
     # into the team's sheet) reaches only this process
-    LEDGER_EXECUTOR: ("SINDARIN_LEDGER_GOOGLE_SA",),
+    LEDGER_EXECUTOR: (
+        "SINDARIN_LEDGER_GOOGLE_SA",
+        "STRIPE_SECRET_KEY",
+        "INCREASE_API_KEY",
+        "HUBSPOT_TOKEN",
+        "BILLING_CUSTOMER_EMAIL",
+        "DROPBOX_SIGN_API_KEY",
+        "DROPBOX_SIGN_SIGNER_EMAIL",
+        "DROPBOX_SIGN_SIGNER_NAME",
+    ),
 }
 PROCESSES = tuple(ROOT_ENV_KEYS)
 # Read by `sindarin bootstrap` and the live scripts, never by a process: a Mattermost server of
@@ -193,6 +209,15 @@ class Env:
     gateway_email: str = ""
     gateway_password: str = ""
     google_sa: str = ""  # path to the service-account key, sindarin-ledger only
+    stripe_key: str = ""  # the Stripe secret key, sindarin-ledger only, for the Stripe rail
+    increase_key: str = ""  # the Increase API key, sindarin-ledger only, for the Increase rail
+    hubspot_token: str = ""  # a HubSpot private-app token, sindarin-ledger only
+    billing_email: str = ""  # where Stripe invoices go in the demo (else the signer's address)
+    dropbox_sign_key: str = ""  # Dropbox Sign API key, sindarin-ledger only
+    dropbox_sign_signer: str = ""  # who signs the order forms (the customer's signer)
+    dropbox_sign_signer_name: str = ""
+    drive_sa: str = ""  # the service-account key for Drive and Slides, sindarin-switch only
+    drive_folder: str = ""  # the shared folder the board packs go into
 
     @classmethod
     def from_values(cls, v: dict[str, str]) -> Env:
@@ -205,6 +230,15 @@ class Env:
             gateway_email=v.get("SWITCH_GATEWAY_EMAIL", ""),
             gateway_password=v.get("SWITCH_GATEWAY_PASSWORD", ""),
             google_sa=v.get("SINDARIN_LEDGER_GOOGLE_SA", ""),
+            stripe_key=v.get("STRIPE_SECRET_KEY", ""),
+            increase_key=v.get("INCREASE_API_KEY", ""),
+            hubspot_token=v.get("HUBSPOT_TOKEN", ""),
+            billing_email=v.get("BILLING_CUSTOMER_EMAIL", ""),
+            dropbox_sign_key=v.get("DROPBOX_SIGN_API_KEY", ""),
+            dropbox_sign_signer=v.get("DROPBOX_SIGN_SIGNER_EMAIL", ""),
+            dropbox_sign_signer_name=v.get("DROPBOX_SIGN_SIGNER_NAME", ""),
+            drive_sa=v.get("SINDARIN_GOOGLE_SA", ""),
+            drive_folder=v.get("GOOGLE_DRIVE_FOLDER_ID", ""),
         )
 
     def missing(self, *names: str) -> list[str]:
@@ -247,6 +281,35 @@ class ExecutorConfig(BaseModel):
     ledger_db: str = "books.db"  # the ledger file (ledger.db is the executor's own state)
     data_dir: str = "../data/acme"  # the period folders `sindarin ledger import` loads
     sheet_url: str = ""  # the team's Google Sheet the ledger mirrors (import and write-back)
+    payment_rail: str = Field(
+        default="file", pattern="^(file|stripe|increase)$"
+    )  # how a run is paid
+    payment_env: str = Field(default="sandbox", pattern="^(sandbox|production)$")  # Increase
+    payments_dir: str = "payments"  # where the bank files and the rail's state go
+    invoicing: str = Field(default="off", pattern="^(off|stripe)$")  # a won deal is invoiced
+    crm: str = Field(default="off", pattern="^(off|hubspot)$")  # the deal lives in the CRM too
+    esign: str = Field(default="off", pattern="^(off|dropbox_sign)$")  # the order form goes out
+    # sindarin-switch
+    board_pack: str = Field(default="off", pattern="^(off|drive)$")  # the month into Drive/Slides
+
+    @field_validator("invoicing", "crm", "esign", "board_pack", mode="before")
+    @classmethod
+    def _yaml_off(cls, v: Any, info: Any) -> Any:
+        """YAML reads a bare `off` as False; it means off. A bare `on` means the one option."""
+        on = {
+            "invoicing": "stripe",
+            "crm": "hubspot",
+            "esign": "dropbox_sign",
+            "board_pack": "drive",
+        }
+        if v is False or v is None:
+            return "off"
+        if v is True:
+            return on.get(info.field_name, "off")
+        return v
+
+    vendor_banks: dict[str, str] = Field(default_factory=dict)  # vendor → "routing:account"
+    increase_entity_id: str = ""  # the verified entity in production; the sandbox makes a demo one
     # sindarin-switch
     room_creation: str = Field(default="gateway", pattern="^(gateway|agent_op)$")
     addressing: str = Field(default="rooms", pattern="^(rooms|open)$")  # layer 0 (§5, §12.4 item 5)

@@ -34,6 +34,15 @@ class Status:
 
 
 @dataclass(frozen=True)
+class Paid:
+    """The bank has paid a sent run (sindarin-ledger): a person in the run's approver groups
+    types the bank's reference; the payables become paid and the payments are booked."""
+
+    artifact_id: str
+    reference: str
+
+
+@dataclass(frozen=True)
 class Whoami:
     pass
 
@@ -128,11 +137,20 @@ class Chart:
     what: str
 
 
+@dataclass(frozen=True)
+class Pack:
+    """The month's board pack (sindarin-switch): the report, its charts and the exports into a
+    Drive folder and a Slides deck, the links posted back."""
+
+    period: str
+
+
 Command = (
     Approve
     | Deny
     | Changes
     | Status
+    | Paid
     | Whoami
     | Help
     | Board
@@ -146,6 +164,7 @@ Command = (
     | Report
     | Export
     | Chart
+    | Pack
 )
 
 _ID = r"((?:GOALS|BUDGET|ENTRIES|CLOSE|PAY|LOCK|DEAL)-\d+)"
@@ -154,6 +173,7 @@ _TABLE: tuple[tuple[re.Pattern[str], type], ...] = (
     (re.compile(rf"^deny\s+{_ID}(?:\s+(.{{1,300}}))?$", re.IGNORECASE | re.DOTALL), Deny),
     (re.compile(rf"^changes\s+{_ID}\s+(.{{1,500}})$", re.IGNORECASE | re.DOTALL), Changes),
     (re.compile(rf"^status(?:\s+{_ID})?$", re.IGNORECASE), Status),
+    (re.compile(r"^paid\s+(PAY-\d+)\s+([^\s`]{1,60})$", re.IGNORECASE), Paid),
     (re.compile(r"^whoami$", re.IGNORECASE), Whoami),
     (re.compile(r"^help$", re.IGNORECASE), Help),
     (re.compile(r"^board$", re.IGNORECASE), Board),
@@ -191,12 +211,14 @@ _TABLE: tuple[tuple[re.Pattern[str], type], ...] = (
     (re.compile(r"^report\s+(\d{4}-\d{2})$", re.IGNORECASE), Report),
     (re.compile(r"^export\s+(\d{4}-\d{2})\s+([a-z]{3,12})$", re.IGNORECASE), Export),
     (re.compile(r"^chart\s+(\d{4}-\d{2})\s+([a-z]{3,12})$", re.IGNORECASE), Chart),
+    (re.compile(r"^pack\s+(\d{4}-\d{2})$", re.IGNORECASE), Pack),
 )
 TRAILING_PUNCTUATION = " .!,;:"  # people end commands with a period; it changes nothing
 
 HELP_TEXT = (
     "Commands: `approve <id>` · `deny <id> <reason>` · `changes <id> <note>` · "
-    "`status [<id>]` · `whoami` · `help` · `board` · `brief` (the plan room's goals) · "
+    "`status [<id>]` · `paid <PAY-n> <bank reference>` (the bank has paid a sent run) · "
+    "`whoami` · `help` · `board` · `brief` (the plan room's goals) · "
     "`sale <invoice> <amount> <customer>` (a late sale lands in the books) · "
     "`price <product> <amount>` (a list price moves) · "
     "`read <link> [tab]` (any Google Sheet, Drive file, .xlsx or .csv: what it holds, what to "
@@ -204,7 +226,9 @@ HELP_TEXT = (
     "`load <link>` (the team's file into the books) · "
     "`report <period>` · "
     "`export <period> sales|payables|budget|planned|targets|deals|journal|audit` · "
-    "`chart <period> revenue|budget|costs|target|deals` · `audit <id>|<period>` (who did what, "
+    "`chart <period> revenue|budget|costs|target|deals` · `pack <period>` (the board pack: "
+    "report, charts and exports into Drive and a Slides deck) · `audit <id>|<period>` (who did "
+    "what, "
     "by participant id) · `who approves [<kind>]`. Months may be named: `chart October revenue`, "
     "`report for November`, `export october sales`. "
     "Ids are GOALS-n, BUDGET-n, ENTRIES-n (the plan), CLOSE-n, PAY-n, LOCK-n (the close) and "
@@ -245,6 +269,8 @@ def parse_command(body: str, names: tuple[str, ...] = DEFAULT_NAMES) -> Command 
             return Price(m.group(1), cents)
         if cls is Report:
             return Report(m.group(1))
+        if cls is Pack:
+            return Pack(m.group(1))
         if cls is Audit:
             return Audit((m.group(1) or m.group(2)).upper())
         if cls is Approvers:
@@ -258,6 +284,8 @@ def parse_command(body: str, names: tuple[str, ...] = DEFAULT_NAMES) -> Command 
         if cls is Status:
             aid = m.group(1)
             return Status(aid.upper() if aid else None)
+        if cls is Paid:
+            return Paid(m.group(1).upper(), m.group(2))
         aid = m.group(1).upper()
         if cls is Deny:
             reason = (m.group(2) or "").strip() or None
@@ -315,7 +343,7 @@ FILLER = frozenset(
         "as",
     )
 )
-LOOSE_VERBS = ("report", "chart", "export", "audit")
+LOOSE_VERBS = ("report", "chart", "export", "audit", "pack")
 CHART_KINDS = ("revenue", "budget", "costs", "target", "deals")
 EXPORT_TABLES = ("sales", "payables", "budget", "planned", "targets", "deals", "journal", "audit")
 _PERIOD = re.compile(r"^\d{4}-\d{2}$")
@@ -368,6 +396,8 @@ def parse_loose(text: str) -> Command | None:
         return Report(period) if not subjects else None
     if verb == "audit":
         return Audit(period) if not subjects else None
+    if verb == "pack":
+        return Pack(period) if not subjects else None
     kinds = CHART_KINDS if verb == "chart" else EXPORT_TABLES
     subject = next((w for w in subjects if w in kinds), None)
     if subject is None or len(subjects) != 1:

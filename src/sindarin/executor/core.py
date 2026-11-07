@@ -37,6 +37,7 @@ from sindarin.policy import (
     check_target,
 )
 from sindarin.schema import (
+    AWAITING_STATES,
     FAILURE_OF,
     HEAD_OF,
     IN_FLIGHT_STATES,
@@ -144,6 +145,66 @@ class Verify:
 class SetValue:
     key: str
     value: str
+
+
+@dataclass(frozen=True)
+class ConfirmPaid:
+    """Runner: the bank's confirmation for a sent run → adapter.confirm → core.after_confirm()."""
+
+    artifact_id: str
+    reference: str
+    room_id: str
+    thread_id: str | None
+    actor_id: str
+    actor_name: str
+
+
+@dataclass(frozen=True)
+class PollPayment:
+    """Runner: ask the rail where a sent run stands → core.after_confirm() once it is paid."""
+
+    artifact_id: str
+
+
+@dataclass(frozen=True)
+class PollInvoice:
+    """Runner: ask the biller whether a won deal's invoice is paid → core.after_collect()."""
+
+    artifact_id: str
+
+
+@dataclass(frozen=True)
+class CrmSync:
+    """Runner: the deal into the CRM at its stage (open when proposed, won, lost)."""
+
+    artifact_id: str
+    stage: str
+
+
+@dataclass(frozen=True)
+class SendContract:
+    """Runner: the won deal's order form out for signature."""
+
+    artifact_id: str
+
+
+@dataclass(frozen=True)
+class PollSignature:
+    """Runner: whether the order form came back signed."""
+
+    artifact_id: str
+
+
+@dataclass(frozen=True)
+class BuildPack:
+    """Runner (sindarin-switch): the month's board pack into Drive and Slides, links back."""
+
+    period: str
+    room_id: str
+    thread_id: str | None
+    actor_id: str
+    actor_name: str
+    auto: bool = False
 
 
 @dataclass(frozen=True)
@@ -426,11 +487,31 @@ def summarize(ctx: Context, a: Artifact) -> str:
 def action_phrase(a: Artifact, result: dict[str, Any]) -> str:
     body: Any = a.proposal().body
     if a.kind is Kind.DEAL:
-        return f"won · sale {money(body.price_cents, body.currency)} posted to {body.period}"
+        phrase = f"won · sale {money(body.price_cents, body.currency)} posted to {body.period}"
+        if result.get("invoice_id"):
+            phrase += (
+                f" · invoice **{result['invoice_id']}** sent, due in "
+                f"{int(result.get('due_days', 30))} days"
+            )
+        elif result.get("invoice_error"):
+            phrase += f" · invoice not sent ({result['invoice_error']})"
+        return phrase
     if a.kind is Kind.PAY:
         total = int(result.get("total_cents", body.total_cents))
-        n = int(result.get("paid", len(body.run)))
-        return f"paid {money(total, body.currency)} · {n} payable{'s' if n != 1 else ''}"
+        n = len(body.run)
+        payables = f"{n} payable{'s' if n != 1 else ''}"
+        if int(result.get("paid", 0)) >= n or "sent" not in result:
+            tail = f" · reference **{result['reference']}**" if result.get("reference") else ""
+            via = ""
+            if result.get("rail_confirms") and result.get("rail"):
+                via = f" via {result['rail']}"
+            if result.get("balance_after_cents") is not None:
+                after = money(int(result["balance_after_cents"]), body.currency)
+                tail += f" · operating balance {after}"
+            return f"paid {money(total, body.currency)}{via} · {payables}{tail}"
+        rail = str(result.get("rail") or "the bank")
+        doc = f" · file **{result['document']}**" if result.get("document") else ""
+        return f"sent to {rail} · {payables} · {money(total, body.currency)}{doc}"
     if a.kind is Kind.LOCK:
         n = int(result.get("entries_posted", len(body.entries)))
         return f"{n} entr{'y' if n == 1 else 'ies'} posted · period {body.period} locked"
@@ -691,6 +772,37 @@ def handle_sweep(ctx: Context) -> list[Effect]:
             )
             effects.append(Audit("retry", a.id, details={"attempt": a.attempts + 1}))
             effects.append(Execute(a.id))
+    # a run on a rail that reports its own status: ask it, once a minute, until it is paid
+    for a in ctx.view.in_states(State.SENT):
+        if a.kind not in ctx.kinds or not a.result().get("rail_confirms"):
+            continue
+        last = ctx.view.get_value(f"poll:{a.id}")
+        if last and (ctx.now - datetime.fromisoformat(last)) < timedelta(seconds=55):
+            continue
+        effects.append(SetValue(f"poll:{a.id}", ctx.now.isoformat()))
+        effects.append(PollPayment(a.id))
+    # a won deal with an invoice out: ask the biller, once a minute, until the customer pays
+    for a in ctx.view.in_states(State.WON):
+        if a.kind not in ctx.kinds or not a.result().get("invoice_id"):
+            continue
+        if ctx.view.get_value(f"collected:{a.id}") is not None:
+            continue
+        last = ctx.view.get_value(f"poll:{a.id}")
+        if last and (ctx.now - datetime.fromisoformat(last)) < timedelta(seconds=55):
+            continue
+        effects.append(SetValue(f"poll:{a.id}", ctx.now.isoformat()))
+        effects.append(PollInvoice(a.id))
+    # an order form out for signature: ask once a minute until it is signed or declined
+    for a in ctx.view.in_states(State.WON):
+        if a.kind not in ctx.kinds or ctx.view.get_value(f"esign:{a.id}") is None:
+            continue
+        if ctx.view.get_value(f"signed:{a.id}") is not None:
+            continue
+        last = ctx.view.get_value(f"pollsig:{a.id}")
+        if last and (ctx.now - datetime.fromisoformat(last)) < timedelta(seconds=55):
+            continue
+        effects.append(SetValue(f"pollsig:{a.id}", ctx.now.isoformat()))
+        effects.append(PollSignature(a.id))
     # crash recovery: anything mid-flight when we sweep was interrupted
     for a in ctx.view.in_states(State.APPROVED):
         if a.kind not in ctx.kinds:
@@ -838,6 +950,7 @@ def _handle_proposal(ctx: Context, ev: MessageEvent) -> list[Effect]:
             rule=rule.name,
             snapshot_sha=snapshot.hash,
         ),
+        *([CrmSync(aid, "open")] if proposal.kind is Kind.DEAL else []),
         Post(ev.room_id, pending_text(ctx, artifact, rule), thread_id=thread),
         *_status(ctx, artifact),
     ]
@@ -918,6 +1031,16 @@ def _order_check(ctx: Context, proposal: Proposal, thread: str) -> str | None:
             if a.proposal().body.plan == head_id
         ]
         if not paid:
+            sent = [
+                a
+                for a in ctx.view.in_states(State.SENT, kind=Kind.PAY)
+                if a.proposal().body.plan == head_id
+            ]
+            if sent:
+                return (
+                    f"{sent[0].id} is sent, not paid; the lock follows the bank's confirmation "
+                    f"(`paid {sent[0].id} <reference>`)"
+                )
             return f"{head_id} names payables; the lock follows their payment run being paid"
         if body.pay_run and body.pay_run not in {a.id for a in paid}:
             return f"{body.pay_run} is not a paid run of {head_id}"
@@ -1030,6 +1153,8 @@ def _handle_command(ctx: Context, ev: MessageEvent) -> list[Effect]:
             return [Post(ev.room_id, _status_one(ctx, a), thread_id=thread)]
         case cmd.Brief():
             return _brief(ctx, ev)
+        case cmd.Paid(artifact_id=aid, reference=reference):
+            return _paid(ctx, ev, aid, reference)
         case cmd.Sale(invoice=invoice, amount_cents=cents, customer=customer):
             return _sale(ctx, ev, invoice, cents, customer)
         case cmd.Price(product=product, amount_cents=cents):
@@ -1048,6 +1173,8 @@ def _handle_command(ctx: Context, ev: MessageEvent) -> list[Effect]:
             return _report(ctx, ev, "export", period, what)
         case cmd.Chart(period=period, what=what):
             return _report(ctx, ev, "chart", period, what)
+        case cmd.Pack(period=period):
+            return _pack(ctx, ev, period)
         case cmd.Board():
             if ctx.executor != SWITCH_EXECUTOR:
                 return [
@@ -1113,6 +1240,24 @@ def _report(ctx: Context, ev: MessageEvent, what: str, period: str, subject: str
     return [
         RunReport(what, period, subject, ev.room_id, thread, ev.sender, name),
         _audit(ev, f"{what}_requested", period=period, subject=subject),
+    ]
+
+
+def _pack(ctx: Context, ev: MessageEvent, period: str) -> list[Effect]:
+    """The board pack is sindarin-switch's: it holds the read-only ledger and the Drive key."""
+    thread = _reply_thread(ev)
+    if ctx.executor != SWITCH_EXECUTOR:
+        return [
+            Post(
+                ev.room_id,
+                f"The board pack is built by {SWITCH_EXECUTOR}: type `pack {period}` to it.",
+                thread_id=thread,
+            )
+        ]
+    name = ctx.name_of(ev.sender, ev.sender_name)
+    return [
+        BuildPack(period, ev.room_id, thread, ev.sender, name),
+        _audit(ev, "pack_requested", period=period),
     ]
 
 
@@ -1496,6 +1641,7 @@ def _deny(ctx: Context, ev: MessageEvent, aid: str, reason: str | None) -> list[
             {"approver_id": ev.sender, "approver_name": name, "note": reason},
         ),
         _audit(ev, "denied", aid, reason=reason),
+        *([CrmSync(a.id, "lost")] if a.kind is Kind.DEAL else []),
         Post(
             ev.room_id,
             f"**{aid}** denied by {name}{suffix}. @{ctx.name_of(a.proposer_id)} nothing happens.",
@@ -1554,10 +1700,13 @@ def after_execute(ctx: Context, a: Artifact, result: ActionResult, verified: boo
         return [Audit("execute_result_ignored", a.id, details={"state": a.state.value})]
     name = a.approver_name or ctx.name_of(a.approver_id or "")
     if result.ok and verified:
+        landed = SUCCESS_OF[a.kind]
+        if a.kind is Kind.PAY and int(result.data.get("paid", 0)) < len(a.proposal().body.run):
+            landed = State.SENT
         return [
             Transition(
                 a.id,
-                SUCCESS_OF[a.kind],
+                landed,
                 {"result_json": json.dumps(result.data, sort_keys=True), "error": None},
             ),
             Audit(
@@ -1577,8 +1726,10 @@ def after_execute(ctx: Context, a: Artifact, result: ActionResult, verified: boo
                 f"verified at **{ctx.now:%H:%M:%S} UTC**.",
                 thread_id=a.thread_id,
             ),
+            *_sent_next_step(ctx, a, result.data, landed),
+            *_deal_connectors(a, landed),
             *_room_opened(ctx, a, result.data),
-            *_status(ctx, a, SUCCESS_OF[a.kind]),
+            *_status(ctx, a, landed),
         ]
     error = result.error or ("not visible on read-back" if result.ok else "unknown platform error")
     action = a.proposal().action.replace("_", " ")
@@ -1609,6 +1760,162 @@ def after_execute(ctx: Context, a: Artifact, result: ActionResult, verified: boo
             thread_id=a.thread_id,
         ),
         *_status(ctx, a, State.FAILED),
+    ]
+
+
+def _sent_next_step(ctx: Context, a: Artifact, data: dict[str, Any], landed: State) -> list[Effect]:
+    """A run handed to the bank file: the batch in the thread and the line a person types once
+    the bank has paid. A polling rail needs nothing from anyone."""
+    if a.kind is Kind.DEAL and data.get("invoice_url"):
+        return [
+            Post(
+                a.room_id,
+                f"**{a.id}** invoice for {data.get('account', 'the customer')}: "
+                f"{data['invoice_url']} · I check it until it is paid, then the receipt is "
+                "booked.",
+                thread_id=a.thread_id,
+            )
+        ]
+    if landed is not State.SENT or a.kind is not Kind.PAY:
+        return []
+    if data.get("rail_confirms"):
+        return [
+            Post(
+                a.room_id,
+                f"**{a.id}** is with {data.get('rail', 'the rail')}; I check it until every "
+                "payout is paid, then the period can lock.",
+                thread_id=a.thread_id,
+            )
+        ]
+    body = ""
+    if data.get("document_csv"):
+        body = f"\n```csv\n{str(data['document_csv']).strip()[:2500]}\n```"
+    return [
+        Post(
+            a.room_id,
+            f"**{a.id}** payment file **{data.get('document', a.id + '.csv')}** for the bank "
+            f"portal.{body}\nOnce the bank has paid, confirm with "
+            f"`@{LEDGER_EXECUTOR} paid {a.id} <bank reference>`; the period locks after that.",
+            thread_id=a.thread_id,
+        )
+    ]
+
+
+def _deal_connectors(a: Artifact, landed: State) -> list[Effect]:
+    """A won deal reaches the CRM and goes out for signature; the runner skips what is not
+    configured."""
+    if a.kind is not Kind.DEAL or landed is not State.WON:
+        return []
+    return [CrmSync(a.id, "won"), SendContract(a.id)]
+
+
+def after_collect(ctx: Context, a: Artifact, data: dict[str, Any]) -> list[Effect]:
+    """The customer paid the deal's invoice: the receipt is booked and the room is told."""
+    receipt = data.get("receipt") or {}
+    body: Any = a.proposal().body
+    amount = money(int(receipt.get("amount_cents", body.price_cents)), body.currency)
+    return [
+        SetValue(f"collected:{a.id}", ctx.now.isoformat()),
+        Audit("receipt_booked", a.id, details={k: v for k, v in data.items() if k != "receipt"}),
+        Post(
+            a.room_id,
+            f"**{a.id}** paid by {body.account} · {amount} received on invoice "
+            f"**{data.get('invoice_id', '')}** · receipt booked to "
+            f"{receipt.get('period', body.period)} (cash up, receivables down) at "
+            f"**{ctx.now:%H:%M:%S} UTC**.",
+            thread_id=a.thread_id,
+        ),
+    ]
+
+
+def after_confirm(
+    ctx: Context, a: Artifact, data: dict[str, Any], *, actor_name: str = ""
+) -> list[Effect]:
+    """The rail or the bank says the run is paid: the artifact lands in PAID and the lock
+    stage line follows on the next sweep. A run still partly out stays SENT."""
+    if a.state is not State.SENT:
+        return [Audit("confirm_ignored", a.id, details={"state": a.state.value})]
+    result = {**a.result(), **data}
+    n = len(a.proposal().body.run)
+    if int(data.get("paid", 0)) < n:
+        return [
+            Transition(a.id, State.SENT, {"result_json": json.dumps(result, sort_keys=True)}),
+            Audit("payment_progress", a.id, details={k: v for k, v in data.items()}),
+        ]
+    by = f" by {actor_name}" if actor_name else f" by {data.get('rail', 'the rail')}"
+    return [
+        Transition(
+            a.id, State.PAID, {"result_json": json.dumps(result, sort_keys=True), "error": None}
+        ),
+        Audit("paid", a.id, actor_name=actor_name or None, details=dict(data)),
+        Post(
+            a.room_id,
+            f"**{a.id}** paid{by} · {action_phrase(a, result)} · booked and verified at "
+            f"**{ctx.now:%H:%M:%S} UTC**.",
+            thread_id=a.thread_id,
+        ),
+        *_status(ctx, a, State.PAID),
+    ]
+
+
+def _paid(ctx: Context, ev: MessageEvent, aid: str, reference: str) -> list[Effect]:
+    """`paid PAY-n <reference>`: a person in the run's approver groups reports the bank's
+    confirmation. Agents are refused; a run that was never sent, or is already paid, is named."""
+    thread = _reply_thread(ev)
+    a = ctx.view.get(aid)
+    if a is None or a.kind is not Kind.PAY or a.kind not in ctx.kinds:
+        return _refuse(ev, "refused_paid:unknown", f"**{aid}** is unknown here.", aid)
+    if ev.sender in ctx.agent_ids:
+        return _refuse(
+            ev,
+            "refused_paid:agent",
+            f"**{aid}** not confirmed — agents and executors do not confirm payments.",
+            aid,
+        )
+    rule = ctx.policy.rule(a.rule)
+    groups = [
+        g
+        for g in ((rule.approvers if rule else ""), (rule.approvers_under_limit if rule else ""))
+        if g
+    ]
+    if not any(ev.sender in ctx.policy.group_members(g) for g in groups):
+        name = ctx.name_of(ev.sender, ev.sender_name)
+        return _refuse(
+            ev,
+            "refused_paid:not_in_group",
+            f"**{aid}** not confirmed — {name} is not in the {' or '.join(groups)} group.",
+            aid,
+        )
+    if rule is not None and not _proposal_room_ok(ctx, rule, ev.room_id):
+        return _refuse(
+            ev,
+            "refused_paid:wrong_room",
+            f"**{aid}** not confirmed — I take paid commands in "
+            f"{_rule_room_name(ctx, rule, a)} only.",
+            aid,
+        )
+    if a.state is State.PAID:
+        return _refuse(ev, "refused_paid:already", f"**{aid}** is already paid.", aid)
+    if a.state is not State.SENT:
+        return _refuse(
+            ev,
+            "refused_paid:not_sent",
+            f"**{aid}** not confirmed — it is {a.state.value}, not sent to the bank.",
+            aid,
+        )
+    if a.result().get("rail_confirms"):
+        return _refuse(
+            ev,
+            "refused_paid:rail_confirms",
+            f"**{aid}** is confirmed by {a.result().get('rail', 'the rail')} itself; I am "
+            "checking it.",
+            aid,
+        )
+    return [
+        _audit(ev, "paid_reported", aid, reference=reference),
+        ConfirmPaid(
+            aid, reference, ev.room_id, thread, ev.sender, ctx.name_of(ev.sender, ev.sender_name)
+        ),
     ]
 
 
@@ -1749,6 +2056,17 @@ def _switch_stages(ctx: Context) -> list[Effect]:
                 head.thread_id,
             ),
         ]
+        finance_room = ctx.policy.room_id("finance")
+        if (
+            head.kind is Kind.CLOSE
+            and finance_room
+            and ctx.view.get_value(f"pack:{head.period}") is None
+        ):
+            # the locked month's board pack, in the thread the business asked in
+            effects += [
+                SetValue(f"pack:{head.period}", ctx.now.isoformat()),
+                BuildPack(head.period, finance_room, head.ask_root_id or None, "", "", auto=True),
+            ]
     finance = ctx.policy.room_id("finance")
     for deal in ctx.peer_artifacts:
         # a won deal is told once to the finance room: the books moved by a sale
@@ -1771,6 +2089,16 @@ def _switch_stages(ctx: Context) -> list[Effect]:
                 f"{money(dbody.price_cents, dbody.currency)} landed in {dbody.period}{now}.",
             ),
             Audit("stage_line", deal.id, details={"stage": "won"}),
+        ]
+    for head in ctx.view.in_states(State.DONE):
+        # a locked month gets its board pack once, where the business asked for the close
+        if head.kind is not Kind.CLOSE or not finance:
+            continue
+        if ctx.view.get_value(f"pack:{head.period}") is not None:
+            continue
+        effects += [
+            SetValue(f"pack:{head.period}", ctx.now.isoformat()),
+            BuildPack(head.period, finance, head.ask_root_id or None, "", "", auto=True),
         ]
     return effects
 
@@ -1902,6 +2230,12 @@ def _waiting_on(ctx: Context, a: Artifact) -> str:
         return "retry"
     if a.state in IN_FLIGHT_STATES:
         return "executor"
+    if a.state is State.SENT:
+        return (
+            "the bank's confirmation"
+            if not a.result().get("rail_confirms")
+            else str(a.result().get("rail", "the rail"))
+        )
     if a.kind is Kind.GOALS and a.state is State.OPEN:
         return f"{PLANNER} and {BOOKKEEPER}"
     if a.kind is Kind.CLOSE and a.state is State.OPEN:
@@ -1911,7 +2245,13 @@ def _waiting_on(ctx: Context, a: Artifact) -> str:
 
 def board_text(ctx: Context) -> str:
     """§14: two sections, numbers from the executors' state, no commentary."""
-    live = {State.OPEN, State.DONE} | WAITING_STATES | IN_FLIGHT_STATES | RETRY_STATES
+    live = (
+        {State.OPEN, State.DONE}
+        | WAITING_STATES
+        | IN_FLIGHT_STATES
+        | RETRY_STATES
+        | AWAITING_STATES
+    )
     own = [a for a in ctx.view.in_states(*live) if a.kind in ctx.kinds]
     peers = [a for a in ctx.peer_artifacts if a.state in live]
     rows = sorted(own + peers, key=lambda a: a.created_at)
@@ -1941,7 +2281,13 @@ def board_text(ctx: Context) -> str:
 
 
 def _status_room(ctx: Context, room_id: str) -> str:
-    live = WAITING_STATES | IN_FLIGHT_STATES | RETRY_STATES | {State.OPEN, State.DONE}
+    live = (
+        WAITING_STATES
+        | IN_FLIGHT_STATES
+        | RETRY_STATES
+        | AWAITING_STATES
+        | {State.OPEN, State.DONE}
+    )
     rows = [a for a in ctx.view.in_states(*live) if a.kind in ctx.kinds and a.room_id == room_id]
     if not rows:
         return "No open artifacts in this room."
@@ -1954,6 +2300,8 @@ def _status_room(ctx: Context, room_id: str) -> str:
             extra = f"changes requested: {a.note}"
         elif a.state in RETRY_STATES:
             extra = f"failed: {a.error} · retrying"
+        elif a.state is State.SENT:
+            extra = f"sent · waiting on {_waiting_on(ctx, a)}"
         else:
             extra = "in progress"
         out.append(f"**{a.id}** · {a.state.value} · {summarize(ctx, a)} · {extra}")

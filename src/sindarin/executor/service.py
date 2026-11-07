@@ -56,6 +56,7 @@ class ExecutorService:
         *,
         ledger: Any | None = None,
         files: Any | None = None,
+        pack: Any | None = None,
     ) -> None:
         self.exec_dir = exec_dir
         self.env = env
@@ -69,6 +70,7 @@ class ExecutorService:
             runner_config(exec_dir, cfg),
             ledger=ledger,
             files=files,
+            pack=pack,
         )
         self.queue: asyncio.Queue[object] = asyncio.Queue()
         self.stop = asyncio.Event()
@@ -196,7 +198,61 @@ def build_adapters(env: Env, cfg: ExecutorConfig, exec_dir: Path) -> dict[str, A
                 log.info("write-back into the team's sheet is on")
             except Exception as exc:
                 log.warning("sheet write-back off: %s", str(exc)[:120])
-        return {"ledger": LedgerAdapter(Ledger(cfg.resolve(exec_dir, cfg.ledger_db)), writer)}
+        from sindarin.payments import RailError, build_rail
+
+        try:
+            rail = build_rail(
+                cfg.payment_rail,
+                folder=cfg.resolve(exec_dir, cfg.payments_dir),
+                stripe_key=env.stripe_key,
+                increase_key=env.increase_key,
+                sandbox=cfg.payment_env == "sandbox",
+                vendor_banks=cfg.vendor_banks,
+                entity_id=cfg.increase_entity_id,
+            )
+        except RailError as exc:
+            log.warning("%s; paying through the bank file instead", exc)
+            rail = build_rail("file", folder=cfg.resolve(exec_dir, cfg.payments_dir))
+        log.info("payment rail: %s", rail.name)
+        billing = None
+        if cfg.invoicing == "stripe":
+            if env.stripe_key:
+                from sindarin.billing import StripeBilling
+
+                billing = StripeBilling(
+                    env.stripe_key, customer_email=env.billing_email or env.dropbox_sign_signer
+                )
+                log.info("invoicing: Stripe (%s)", "test mode" if billing.test_mode else "live")
+            else:
+                log.warning("invoicing is stripe but STRIPE_SECRET_KEY is empty; no invoices")
+        crm = esign = None
+        from sindarin.connect import ConnectorError
+
+        if cfg.crm == "hubspot":
+            from sindarin.crm import HubSpot
+
+            try:
+                crm = HubSpot(env.hubspot_token)
+                log.info("crm: HubSpot")
+            except ConnectorError as exc:
+                log.warning("%s; deals stay out of the CRM", exc)
+        if cfg.esign == "dropbox_sign":
+            from sindarin.esign import DropboxSign
+
+            try:
+                esign = DropboxSign(
+                    env.dropbox_sign_key,
+                    signer_email=env.dropbox_sign_signer,
+                    signer_name=env.dropbox_sign_signer_name,
+                )
+                log.info("e-signature: Dropbox Sign (test mode)")
+            except ConnectorError as exc:
+                log.warning("%s; order forms are not sent", exc)
+        return {
+            "ledger": LedgerAdapter(
+                Ledger(cfg.resolve(exec_dir, cfg.ledger_db)), writer, rail, billing, crm, esign
+            )
+        }
     from sindarin.adapters.switch_rooms import SwitchRoomsAdapter
     from sindarin.switch.gateway import GatewayClient
 
@@ -240,7 +296,7 @@ async def run_executor(exec_dir: Path, short: str) -> int:
     except Exception as exc:
         log.error("adapter setup failed: %s", str(exc)[:200])
         return 1
-    ledger = files = None
+    ledger = files = pack = None
     if cfg.executor == SWITCH_EXECUTOR:
         # the reporting rail: a read-only handle on the books, files through Switch
         from sindarin.adapters.files import GatewayFiles
@@ -251,7 +307,18 @@ async def run_executor(exec_dir: Path, short: str) -> int:
         if ledger is None:
             log.warning("no ledger at %s yet; report/export/chart answer without rows", books)
         files = GatewayFiles(adapters["switch"].gateway)  # type: ignore[union-attr]
-    service = ExecutorService(exec_dir, env, cfg, client, adapters, ledger=ledger, files=files)
+        if cfg.board_pack == "drive":
+            from sindarin.connect import ConnectorError
+            from sindarin.gdrive import GoogleDocs
+
+            try:
+                pack = GoogleDocs(env.drive_folder, sa_path=env.drive_sa)
+                log.info("board pack: Google Drive and Slides")
+            except ConnectorError as exc:
+                log.warning("%s; the board pack stays off", exc)
+    service = ExecutorService(
+        exec_dir, env, cfg, client, adapters, ledger=ledger, files=files, pack=pack
+    )
     log.info("%s starting · self=%s · peers=%s", cfg.executor, cfg.self_id, cfg.peer_ids)
     try:
         return await service.run()

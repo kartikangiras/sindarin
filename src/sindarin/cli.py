@@ -283,6 +283,129 @@ def ledger_reset(executor_dir: Annotated[Path | None, typer.Option()] = None) ->
 
 
 @app.command()
+def rail(
+    kind: Annotated[str, typer.Argument(help="file | stripe | increase")],
+    executor_dir: Annotated[Path | None, typer.Option()] = None,
+    repo_root: Annotated[Path | None, typer.Option()] = None,
+) -> None:
+    """Choose how approved payment runs are paid. `file` writes a bank batch a person confirms;
+    `stripe` needs STRIPE_SECRET_KEY in .env; `increase` pays by ACH from an Increase account
+    and, with no INCREASE_API_KEY in .env, provisions a free sandbox (no signup) and writes the
+    key there."""
+    from sindarin.executor.config import (
+        ensure_root_env,
+        load_config,
+        load_root_env,
+        save_config,
+        write_env_values,
+    )
+    from sindarin.payments import RailError, provision_increase_sandbox
+
+    kind = kind.lower().strip()
+    if kind not in ("file", "stripe", "increase"):
+        _fail(f"unknown rail {kind!r}: file, stripe or increase")
+        return
+    repo = _root(repo_root)
+    exec_dir = _exec_dir(executor_dir)
+    path = exec_dir / "ledger.yaml"
+    cfg = load_config(path)
+    if kind == "stripe" and not load_root_env(repo, ("STRIPE_SECRET_KEY",)).get(
+        "STRIPE_SECRET_KEY"
+    ):
+        _fail("add STRIPE_SECRET_KEY=sk_test_… to .env first")
+        return
+    if kind == "increase" and not load_root_env(repo, ("INCREASE_API_KEY",)).get(
+        "INCREASE_API_KEY"
+    ):
+        try:
+            key = provision_increase_sandbox()
+        except RailError as exc:
+            _fail(f"{exc}; the bank file stays in place")
+            return
+        write_env_values(ensure_root_env(repo), {"INCREASE_API_KEY": key})
+        print("INCREASE_API_KEY: a fresh Increase sandbox, written to .env (no real money moves)")
+    cfg = cfg.model_copy(update={"payment_rail": kind})
+    save_config(path, cfg)
+    print(f"payment rail: {kind} ({path.name}); restart sindarin-ledger to use it")
+
+
+@app.command()
+def invoicing(
+    kind: Annotated[str, typer.Argument(help="off | stripe")],
+    executor_dir: Annotated[Path | None, typer.Option()] = None,
+    repo_root: Annotated[Path | None, typer.Option()] = None,
+) -> None:
+    """Whether a won deal is invoiced. `stripe` sends a real invoice through Stripe (test mode
+    with an sk_test_ key) and books the receipt when the customer pays."""
+    from sindarin.executor.config import load_config, load_root_env, save_config
+
+    kind = kind.lower().strip()
+    if kind not in ("off", "stripe"):
+        _fail(f"unknown invoicing {kind!r}: off or stripe")
+        return
+    if kind == "stripe" and not load_root_env(_root(repo_root), ("STRIPE_SECRET_KEY",)).get(
+        "STRIPE_SECRET_KEY"
+    ):
+        _fail("add STRIPE_SECRET_KEY=sk_test_… to .env first")
+        return
+    path = _exec_dir(executor_dir) / "ledger.yaml"
+    save_config(path, load_config(path).model_copy(update={"invoicing": kind}))
+    print(f"invoicing: {kind} ({path.name}); restart sindarin-ledger to use it")
+
+
+@app.command()
+def connect(
+    name: Annotated[str, typer.Argument(help="hubspot | dropbox-sign | drive")],
+    off: Annotated[bool, typer.Option("--off", help="turn the connector off")] = False,
+    executor_dir: Annotated[Path | None, typer.Option()] = None,
+    repo_root: Annotated[Path | None, typer.Option()] = None,
+) -> None:
+    """Connect a tool. hubspot: the deal lives in the CRM (HUBSPOT_TOKEN). dropbox-sign: the
+    order form goes out for signature when a deal is approved (DROPBOX_SIGN_API_KEY and
+    DROPBOX_SIGN_SIGNER_EMAIL). drive: a locked month's board pack lands in Drive and Slides
+    (GOOGLE_DRIVE_FOLDER_ID, with SINDARIN_GOOGLE_SA or your own account through
+    `gcloud auth application-default login`)."""
+    from sindarin.executor.config import load_config, load_root_env, save_config
+
+    plans = {
+        "hubspot": ("ledger.yaml", "crm", "hubspot", ("HUBSPOT_TOKEN",)),
+        "dropbox-sign": (
+            "ledger.yaml",
+            "esign",
+            "dropbox_sign",
+            ("DROPBOX_SIGN_API_KEY", "DROPBOX_SIGN_SIGNER_EMAIL"),
+        ),
+        "drive": ("switch.yaml", "board_pack", "drive", ("GOOGLE_DRIVE_FOLDER_ID",)),
+    }
+    plan = plans.get(name.lower().strip().replace("_", "-"))
+    if plan is None:
+        _fail(f"unknown connector {name!r}: hubspot, dropbox-sign or drive")
+        return
+    yaml_name, field, value, keys = plan
+    if not off:
+        have = load_root_env(_root(repo_root), (*keys, "SINDARIN_GOOGLE_SA"))
+        missing = [k for k in keys if not have.get(k)]
+        if missing:
+            _fail(f"add {', '.join(missing)} to .env first")
+            return
+        if value == "drive":
+            from sindarin.connect import ConnectorError
+            from sindarin.gdrive import GoogleDocs
+
+            try:
+                docs = GoogleDocs(
+                    have["GOOGLE_DRIVE_FOLDER_ID"], sa_path=have.get("SINDARIN_GOOGLE_SA", "")
+                )
+                print(f"Google: signed in as {docs.whoami() or 'an account without an email'}")
+            except ConnectorError as exc:
+                _fail(str(exc))
+                return
+    path = _exec_dir(executor_dir) / yaml_name
+    save_config(path, load_config(path).model_copy(update={field: "off" if off else value}))
+    print(f"{name}: {'off' if off else 'on'} ({yaml_name} {field}); restart the executor to use it")
+
+
+@app.command()
 def bootstrap(
     stack_env: Annotated[
         Path | None,

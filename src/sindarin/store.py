@@ -64,7 +64,9 @@ TRANSITIONS: dict[Kind, dict[State, frozenset[State]]] = {
     Kind.PAY: {
         **_WAITING,
         State.APPROVED: frozenset({State.EXECUTING}),
-        State.EXECUTING: frozenset({State.PAID, State.PAY_FAILED}),
+        State.EXECUTING: frozenset({State.SENT, State.PAID, State.PAY_FAILED}),
+        # sent to the rail: progress notes keep it sent; the bank's or the rail's word pays it
+        State.SENT: frozenset({State.SENT, State.PAID}),
         State.PAY_FAILED: frozenset({State.EXECUTING, State.FAILED}),
         State.PAID: frozenset(),
         State.FAILED: frozenset(),

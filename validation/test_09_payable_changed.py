@@ -54,6 +54,8 @@ def test_changed_after_proposal(harness: Harness):
     h.propose_pay("m-pay-2", thread="m-pay-1")
     assert h.pay().proposal().body.total_cents == 1435000
     h.approve_pay("m-approve-2", sender=JOHN)
+    assert h.pay().state.value == "sent" and len(h.sent()) == 3
+    h.confirm_pay("m-bank", sender=JOHN)
     assert h.pay().state.value == "paid" and len(h.paid()) == 3
     h.assert_no_leaks()
     write_report(

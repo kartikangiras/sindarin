@@ -21,10 +21,11 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS accounts(code TEXT PRIMARY KEY, name TEXT NOT NULL, type TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS sales(
   n INTEGER PRIMARY KEY, invoice TEXT NOT NULL, date TEXT NOT NULL, customer TEXT NOT NULL,
-  amount_cents INTEGER NOT NULL, period TEXT NOT NULL);
+  amount_cents INTEGER NOT NULL, period TEXT NOT NULL, receipt TEXT, collected_at TEXT);
 CREATE TABLE IF NOT EXISTS payables(
   invoice TEXT PRIMARY KEY, vendor TEXT NOT NULL, amount_cents INTEGER NOT NULL, due TEXT NOT NULL,
-  period TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open', run_id TEXT, paid_at TEXT);
+  period TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open', run_id TEXT, paid_at TEXT,
+  reference TEXT, rail TEXT, sent_at TEXT);
 CREATE TABLE IF NOT EXISTS journal(
   id INTEGER PRIMARY KEY, period TEXT NOT NULL, date TEXT NOT NULL, memo TEXT NOT NULL,
   source TEXT NOT NULL, posted_at TEXT NOT NULL);
@@ -116,7 +117,20 @@ class Ledger:
             self._db = sqlite3.connect(self.path, check_same_thread=False)
             self._db.execute("PRAGMA journal_mode=WAL")
             self._db.executescript(SCHEMA)
+            self._migrate()
         self._db.row_factory = sqlite3.Row
+
+    def _migrate(self) -> None:
+        """Columns added after a books file was created (the payment rails, 2026-11-08)."""
+        have = {r[1] for r in self._db.execute("PRAGMA table_info(payables)").fetchall()}
+        for column in ("reference", "rail", "sent_at"):
+            if column not in have:
+                self._db.execute(f"ALTER TABLE payables ADD COLUMN {column} TEXT")
+        have = {r[1] for r in self._db.execute("PRAGMA table_info(sales)").fetchall()}
+        for column in ("receipt", "collected_at"):
+            if column not in have:
+                self._db.execute(f"ALTER TABLE sales ADD COLUMN {column} TEXT")
+        self._db.commit()
 
     def close(self) -> None:
         self._db.close()
@@ -216,7 +230,7 @@ class Ledger:
                 skipped.append({"invoice": str(r["invoice"]), "reason": f"{p} is locked"})
             else:
                 sales.append(r)
-        paid = {r["invoice"] for r in self.payables() if r["status"] == "paid"}
+        paid = {r["invoice"] for r in self.payables() if r["status"] in ("paid", "sent")}
         payables = []
         for r in tabs.get("payables", []):
             inv = str(r["invoice"]).strip()
@@ -279,9 +293,21 @@ class Ledger:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def sale(self, invoice: str) -> dict[str, Any] | None:
+        """One sale with its receipt, if the customer has paid."""
+        row = self._db.execute(
+            "SELECT invoice, date, customer, amount_cents, period, receipt, collected_at "
+            "FROM sales WHERE invoice=? ORDER BY n LIMIT 1",
+            (invoice,),
+        ).fetchone()
+        return dict(row) if row else None
+
     def payables(self, invoices: Iterable[str] | None = None, *, period: str | None = None):
         """Rows as the ledger holds them, sorted by invoice."""
-        sql = "SELECT invoice, vendor, amount_cents, due, period, status, run_id FROM payables"
+        sql = (
+            "SELECT invoice, vendor, amount_cents, due, period, status, run_id, reference, rail, "
+            "sent_at, paid_at FROM payables"
+        )
         args: list[Any] = []
         where = []
         if invoices is not None:
@@ -579,6 +605,107 @@ class Ledger:
             self._db.rollback()
             raise
         return self.planned(period)
+
+    def send(self, run_id: str, references: Mapping[str, str], rail: str) -> int:
+        """Mark the payables of a run as sent to the rail, with each one's reference. No journal
+        yet: the money has left the approval, not the bank. Idempotent on the run; rows paid or
+        sent by another run, or missing, are a refusal."""
+        self._check_write()
+        ids = sorted(references)
+        rows = {r["invoice"]: r for r in self.payables(ids)}
+        missing = [i for i in ids if i not in rows]
+        if missing:
+            raise LedgerError(f"unknown payables: {', '.join(missing)}")
+        other = [
+            i
+            for i in ids
+            if rows[i]["status"] != "open" and rows[i]["run_id"] not in (None, run_id)
+        ]
+        if other:
+            raise LedgerError(f"already taken by another run: {', '.join(other)}")
+        sent = 0
+        for i in ids:
+            r = rows[i]
+            if r["status"] != "open":
+                continue
+            if self.period_status(r["period"]) == "locked":
+                raise LedgerError(f"period {r['period']} is locked")
+            self._db.execute(
+                "UPDATE payables SET status='sent', run_id=?, reference=?, rail=?, sent_at=? "
+                "WHERE invoice=?",
+                (run_id, references[i], rail, _now(), i),
+            )
+            sent += 1
+        self._db.commit()
+        return sent
+
+    def confirm_paid(
+        self,
+        run_id: str,
+        *,
+        reference: str | None = None,
+        invoices: Iterable[str] | None = None,
+        date: str | None = None,
+    ) -> int:
+        """The rail (or the bank, through a person) says the run is paid: the sent rows of the
+        run become paid and the payments are booked. Idempotent: rows already paid by this run
+        are left alone. With `invoices`, only those rows; with `reference`, it is recorded."""
+        self._check_write()
+        rows = [r for r in self.payables(invoices) if r["run_id"] == run_id]
+        if not rows:
+            raise LedgerError(f"nothing sent under {run_id}")
+        when = date or _now()[:10]
+        paid = 0
+        for r in rows:
+            if r["status"] == "paid":
+                continue
+            if r["status"] != "sent":
+                raise LedgerError(f"{r['invoice']} is {r['status']}, not sent")
+            if self.period_status(r["period"]) == "locked":
+                raise LedgerError(f"period {r['period']} is locked")
+            self._db.execute(
+                "UPDATE payables SET status='paid', paid_at=?, reference=COALESCE(?, reference) "
+                "WHERE invoice=?",
+                (_now(), reference, r["invoice"]),
+            )
+            jid = self._journal(r["period"], when, f"paid {r['invoice']} {r['vendor']}", run_id)
+            self._line(jid, EXPENSE, int(r["amount_cents"]), 0)
+            self._line(jid, CASH, 0, int(r["amount_cents"]))
+            paid += 1
+        self._db.commit()
+        return paid
+
+    def collect_sale(self, invoice: str, reference: str, date: str | None = None) -> dict[str, Any]:
+        """The customer paid: cash up, receivables down, the sale marked collected under the
+        billing reference. Idempotent on the invoice; an unknown sale is a refusal."""
+        self._check_write()
+        row = self._db.execute(
+            "SELECT invoice, date, customer, amount_cents, period, receipt FROM sales "
+            "WHERE invoice=? ORDER BY n LIMIT 1",
+            (invoice,),
+        ).fetchone()
+        if row is None:
+            raise LedgerError(f"unknown sale {invoice}")
+        source = f"receipt:{invoice}"
+        if not self.journal_by_source(source):
+            when = date or _now()[:10]
+            jid = self._journal(
+                row["period"], when, f"received {invoice} {row['customer']}", source
+            )
+            self._line(jid, CASH, int(row["amount_cents"]), 0)
+            self._line(jid, RECEIVABLE, 0, int(row["amount_cents"]))
+            self._db.execute(
+                "UPDATE sales SET receipt=?, collected_at=? WHERE invoice=?",
+                (reference, _now(), invoice),
+            )
+            self._db.commit()
+        return {
+            "invoice": invoice,
+            "customer": row["customer"],
+            "amount_cents": int(row["amount_cents"]),
+            "period": row["period"],
+            "receipt": reference,
+        }
 
     def pay(self, run_id: str, invoices: Iterable[str], date: str | None = None) -> int:
         """Mark the payables paid under `run_id` and book the payments. Idempotent on the run:

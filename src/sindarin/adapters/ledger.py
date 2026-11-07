@@ -7,10 +7,14 @@ budget (the rows the planner built it on), the recorded budget for its register 
 
 from __future__ import annotations
 
+import contextlib
+from pathlib import Path
 from typing import Any
 
 from sindarin.adapters.base import ActionResult, AdapterError, Facts, VerifyResult
+from sindarin.connect import ConnectorError
 from sindarin.ledger import Ledger, LedgerError
+from sindarin.payments import BankFileRail, PaymentLine, PaymentRail, RailError
 from sindarin.schema import Artifact, Kind, Proposal, canonical_json, sha256_hex
 
 
@@ -98,9 +102,172 @@ class LedgerAdapter:
     platform = "ledger"
     kinds = frozenset({Kind.BUDGET, Kind.ENTRIES, Kind.PAY, Kind.LOCK, Kind.DEAL})
 
-    def __init__(self, ledger: Ledger, writer: Any | None = None) -> None:
+    def __init__(
+        self,
+        ledger: Ledger,
+        writer: Any | None = None,
+        rail: PaymentRail | None = None,
+        billing: Any | None = None,
+        crm: Any | None = None,
+        esign: Any | None = None,
+    ) -> None:
         self.ledger = ledger
         self.writer = writer  # a SheetWriter when the team's sheet is configured
+        # how an approved run reaches the vendors: the bank file beside the books by default
+        self.rail: PaymentRail = rail or BankFileRail(Path(ledger.path).parent / "payments")
+        self.billing = billing  # a StripeBilling when invoicing is on: a won deal is invoiced
+        self.crm = crm  # a HubSpot when the CRM is on: the deal lives there too
+        self.esign = esign  # a DropboxSign when e-signature is on: the order form goes out
+
+    def crm_sync(self, artifact: Artifact, stage: str, *, known_id: str | None = None) -> dict:
+        if self.crm is None:
+            raise AdapterError("no CRM configured")
+        body: Any = artifact.proposal().body
+        try:
+            out = self.crm.upsert_deal(
+                body.deal_id,
+                account=body.account,
+                product=body.product,
+                amount_cents=int(body.price_cents),
+                stage=stage,
+                known_id=known_id,
+            )
+        except ConnectorError as exc:
+            raise AdapterError(str(exc)[:160]) from None
+        return {"crm_name": self.crm.name, **out}
+
+    def send_contract(self, artifact: Artifact) -> dict[str, Any]:
+        if self.esign is None:
+            raise AdapterError("no e-signature configured")
+        from sindarin.esign import order_form_pdf
+
+        body: Any = artifact.proposal().body
+        pdf = order_form_pdf(
+            body.deal_id,
+            account=body.account,
+            product=body.product,
+            price_cents=int(body.price_cents),
+            list_cents=int(body.list_cents),
+            discount_bps=int(body.discount_bps),
+            currency=body.currency,
+            period=body.period,
+            terms=str(getattr(body, "terms", "standard")),
+        )
+        try:
+            out = self.esign.send_order_form(body.deal_id, account=body.account, pdf=pdf)
+        except ConnectorError as exc:
+            raise AdapterError(str(exc)[:160]) from None
+        return {"provider": self.esign.name, **out}
+
+    def poll_contract(self, request_id: str) -> dict[str, Any]:
+        if self.esign is None:
+            raise AdapterError("no e-signature configured")
+        try:
+            return self.esign.status(request_id)
+        except ConnectorError as exc:
+            raise AdapterError(str(exc)[:160]) from None
+
+    def poll_invoice(self, deal_id: str, invoice_id: str) -> dict[str, Any]:
+        """Where the deal's invoice stands with the biller; book the receipt once it is paid."""
+        if self.billing is None:
+            raise AdapterError("no billing configured")
+        try:
+            seen = self.billing.status(invoice_id)
+        except RailError as exc:
+            raise AdapterError(str(exc)[:160]) from None
+        out = {"invoice_id": invoice_id, **seen}
+        if seen.get("paid"):
+            try:
+                out["receipt"] = self.ledger.collect_sale(deal_id, reference=invoice_id)
+            except LedgerError as exc:
+                raise AdapterError(str(exc)[:160]) from None
+            self._mirror_sales(out["receipt"]["period"])
+        return out
+
+    def _mirror_sales(self, period: str) -> None:
+        if self.writer is None:
+            return
+        try:
+            self.writer.write_tab("sales", self.ledger.sales(period))
+        except Exception as exc:  # the sheet is never the system of record
+            import logging
+
+            logging.getLogger("sindarin.sheets").warning(
+                "write-back to the sheet failed: %s", str(exc)[:120]
+            )
+
+    def _lines(self, body: Any) -> list[PaymentLine]:
+        rows = {r["invoice"]: r for r in self.ledger.payables([x.invoice for x in body.run])}
+        return [
+            PaymentLine(
+                invoice=x.invoice,
+                vendor=str(rows[x.invoice]["vendor"]) if x.invoice in rows else x.vendor,
+                amount_cents=int(rows[x.invoice]["amount_cents"])
+                if x.invoice in rows
+                else x.amount_cents,
+                currency=body.currency,
+                due=str(rows[x.invoice]["due"]) if x.invoice in rows else "",
+            )
+            for x in body.run
+        ]
+
+    def confirm(self, run_id: str, reference: str) -> dict[str, Any]:
+        """The bank's confirmation, typed by a person: the sent rows become paid and booked."""
+        try:
+            paid = self.ledger.confirm_paid(run_id, reference=reference)
+        except LedgerError as exc:
+            raise AdapterError(str(exc)[:160]) from None
+        rows = [r for r in self.ledger.payables() if r["run_id"] == run_id]
+        out = {
+            "paid": sum(1 for r in rows if r["status"] == "paid"),
+            "paid_now": paid,
+            "reference": reference,
+        }
+        self._mirror_payables(rows)
+        return out
+
+    def poll(self, run_id: str) -> dict[str, Any]:
+        """Ask the rail where each sent payable of the run stands; book the ones it calls paid."""
+        rows = [r for r in self.ledger.payables() if r["run_id"] == run_id]
+        landed: list[str] = []
+        failed: list[str] = []
+        for r in rows:
+            if r["status"] != "sent" or not r["reference"]:
+                continue
+            try:
+                t = self.rail.status(str(r["reference"]))
+            except RailError as exc:
+                raise AdapterError(str(exc)[:160]) from None
+            if t.status == "paid":
+                landed.append(str(r["invoice"]))
+            elif t.status == "failed":
+                failed.append(f"{r['invoice']} ({t.detail or 'failed'})")
+        if landed:
+            try:
+                self.ledger.confirm_paid(run_id, invoices=landed)
+            except LedgerError as exc:
+                raise AdapterError(str(exc)[:160]) from None
+            rows = [r for r in self.ledger.payables() if r["run_id"] == run_id]
+            self._mirror_payables(rows)
+        return {
+            "paid": sum(1 for r in rows if r["status"] == "paid"),
+            "paid_now": len(landed),
+            "still_sent": sum(1 for r in rows if r["status"] == "sent"),
+            "failed": failed,
+            "rail": self.rail.name,
+        }
+
+    def _mirror_payables(self, rows: list[dict[str, Any]]) -> None:
+        if self.writer is None or not rows:
+            return
+        try:
+            self.writer.write_tab("payables", self.ledger.payables(period=rows[0]["period"]))
+        except Exception as exc:  # the sheet is never the system of record
+            import logging
+
+            logging.getLogger("sindarin.sheets").warning(
+                "write-back to the sheet failed: %s", str(exc)[:120]
+            )
 
     def _mirror(self, artifact: Artifact) -> None:
         """Write what just landed back into the team's sheet: the budget, the planned lines,
@@ -243,30 +410,73 @@ class LedgerAdapter:
                     },
                 )
             if artifact.kind is Kind.PAY:
-                paid = self.ledger.pay(artifact.id, [x.invoice for x in body.run])
-                return ActionResult(
-                    ok=True,
-                    data={
-                        "run_id": artifact.id,
-                        "paid": paid,
-                        "total_cents": body.total_cents,
-                        "currency": body.currency,
-                    },
-                )
+                lines = self._lines(body)
+                already = {
+                    r["invoice"]: r
+                    for r in self.ledger.payables([x.invoice for x in lines])
+                    if r["run_id"] == artifact.id and r["status"] in ("sent", "paid")
+                }
+                todo = [x for x in lines if x.invoice not in already]
+                try:
+                    transfers = self.rail.send(artifact.id, todo) if todo else {}
+                except RailError as exc:
+                    raise AdapterError(str(exc)[:160]) from None
+                failed = [f"{i} ({t.detail})" for i, t in transfers.items() if t.status == "failed"]
+                if failed:
+                    raise AdapterError(f"{self.rail.name}: {'; '.join(failed)}"[:160])
+                if transfers:
+                    self.ledger.send(
+                        artifact.id, {i: t.reference for i, t in transfers.items()}, self.rail.name
+                    )
+                landed = [i for i, t in transfers.items() if t.status == "paid"]
+                if landed:
+                    self.ledger.confirm_paid(artifact.id, invoices=landed)
+                rows = [r for r in self.ledger.payables() if r["run_id"] == artifact.id]
+                data: dict[str, Any] = {
+                    "run_id": artifact.id,
+                    "rail": self.rail.name,
+                    "rail_confirms": bool(self.rail.confirms),
+                    "sent": sum(1 for r in rows if r["status"] in ("sent", "paid")),
+                    "paid": sum(1 for r in rows if r["status"] == "paid"),
+                    "total_cents": body.total_cents,
+                    "currency": body.currency,
+                    "references": {str(r["invoice"]): str(r["reference"] or "") for r in rows},
+                }
+                doc = self.rail.document(artifact.id, lines)
+                if doc:
+                    data["document"], data["document_csv"] = doc
+                if hasattr(self.rail, "balance"):
+                    with contextlib.suppress(Exception):  # a read-back nicety, never a failure
+                        data["balance_after_cents"] = int(self.rail.balance())
+                return ActionResult(ok=True, data=data)
             if artifact.kind is Kind.DEAL:
                 row = self.ledger.record_deal(artifact.id, body.model_dump())
-                return ActionResult(
-                    ok=True,
-                    data={
-                        "deal_id": body.deal_id,
-                        "account": body.account,
-                        "price_cents": body.price_cents,
-                        "currency": body.currency,
-                        "period": body.period,
-                        "stage": row.get("stage", "won"),
-                        "revenue_cents": int(self.ledger.summary(body.period)["revenue_cents"]),
-                    },
-                )
+                data = {
+                    "deal_id": body.deal_id,
+                    "account": body.account,
+                    "price_cents": body.price_cents,
+                    "currency": body.currency,
+                    "period": body.period,
+                    "stage": row.get("stage", "won"),
+                    "revenue_cents": int(self.ledger.summary(body.period)["revenue_cents"]),
+                }
+                if self.billing is not None:
+                    # the bill goes out once the deal is in the books; a billing failure is
+                    # reported in the room, never a reason to un-win the deal
+                    try:
+                        data.update(
+                            self.billing.invoice(
+                                body.deal_id,
+                                account=body.account,
+                                product=body.product,
+                                amount_cents=int(body.price_cents),
+                                currency=body.currency,
+                                period=body.period,
+                            )
+                        )
+                    except RailError as exc:
+                        data["invoice_error"] = str(exc)[:160]
+                return ActionResult(ok=True, data=data)
             if artifact.kind is Kind.LOCK:
                 posted = self.ledger.post_entries(
                     body.period, [e.model_dump() for e in body.entries], artifact.id
@@ -300,9 +510,12 @@ class LedgerAdapter:
             if artifact.kind is Kind.PAY:
                 rows = self.ledger.payables([x.invoice for x in body.run])
                 ok = len(rows) == len(body.run) and all(
-                    r["status"] == "paid" and r["run_id"] == artifact.id for r in rows
+                    r["status"] in ("sent", "paid") and r["run_id"] == artifact.id for r in rows
                 )
-                return VerifyResult(present=ok, data={"paid": len(rows)} if ok else {})
+                paid = sum(1 for r in rows if r["status"] == "paid")
+                return VerifyResult(
+                    present=ok, data={"sent": len(rows), "paid": paid} if ok else {}
+                )
             if artifact.kind is Kind.DEAL:
                 row = self.ledger.deal(body.deal_id)
                 ok = bool(row) and row["stage"] == "won" and row["source"] == artifact.id

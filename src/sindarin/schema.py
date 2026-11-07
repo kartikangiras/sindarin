@@ -562,6 +562,7 @@ class State(StrEnum):
     RECORD_FAILED = "record_failed"
     PLANNED = "planned"
     PLAN_FAILED = "plan_failed"
+    SENT = "sent"  # a payment run handed to the rail, awaiting the bank's or Stripe's word
     PAID = "paid"
     PAY_FAILED = "pay_failed"
     LOCKED = "locked"
@@ -587,6 +588,7 @@ TERMINAL_STATES = frozenset(
     }
 )
 WAITING_STATES = frozenset({State.PENDING, State.CHANGES_REQUESTED})
+AWAITING_STATES = frozenset({State.SENT})  # approved and sent; the money has not landed yet
 RETRY_STATES = frozenset(
     {
         State.OPEN_FAILED,

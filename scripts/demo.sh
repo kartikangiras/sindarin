@@ -34,6 +34,9 @@ echo "▸ switch + mattermost"; PROFILES="gateway collab" scripts/switch_stack.s
 scripts/dev_stack.sh stop >/dev/null 2>&1 || true
 echo "▸ ledger";        uv run sindarin ledger import | tail -1
 echo "▸ bootstrap";     uv run sindarin bootstrap --stack-env "$STACK_ENV" --people "${PEOPLE:-me}" | grep -E "FAIL|BOOTSTRAP|created|registered|room|board" || true
+# payment runs go out by ACH from a free Increase sandbox (no signup, no real money) when it
+# is reachable; otherwise they stay a bank file a person confirms. RAIL=file|stripe|increase.
+echo "▸ payment rail";  uv run sindarin rail "${RAIL:-increase}" 2>&1 | tail -1 || true
 
 MODEL_FLAG=""
 if grep -qsE '^ANTHROPIC_API_KEY=\S' .env; then

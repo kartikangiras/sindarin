@@ -134,7 +134,12 @@ def close_chain(s: Solo) -> None:
     p = s.watch("payments", r"\*\*PAY-\d+\*\* pending", wait=s.wait * 2)
     pay = s.pending_id(p, "PAY")
     s.say("payments", f"@sindarin-ledger approve {pay}", root=s.root_of(p))
-    s.watch("payments", r"approved by .* · paid", wait=s.wait * 2)
+    # on the bank-file rail the run is sent and a person confirms the bank's word; on Stripe
+    # or Increase the executor pays and confirms on its own
+    done = s.watch("payments", r"approved by .* · (sent to|paid )", wait=s.wait * 2)
+    if done and "sent to" in done["message"]:
+        s.say("payments", f"@sindarin-ledger paid {pay} BANK-7781", root=s.root_of(p))
+        s.watch("payments", r"\*\*PAY-\d+\*\* paid by", wait=s.wait * 2)
     p = s.watch(f"close-{BASIS}", r"\*\*LOCK-\d+\*\* pending", wait=s.wait * 2)
     lock = s.pending_id(p, "LOCK")
     s.say(f"close-{BASIS}", f"@sindarin-ledger approve {lock}", root=s.root_of(p))

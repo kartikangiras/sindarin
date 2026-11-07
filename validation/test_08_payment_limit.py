@@ -28,7 +28,11 @@ def test_limit_selects_the_group(harness: Harness):
     )
     assert h.paid() == []
     h.approve_pay("m-cfo", sender=JOHN)
+    # the approval hands the run to the bank; the books say sent, not paid, until the bank does
+    assert h.pay().state.value == "sent" and len(h.sent()) == 3 and h.paid() == []
+    h.confirm_pay("m-bank", sender=JOHN, reference="BANK-7781")
     assert h.pay().state.value == "paid" and len(h.paid()) == 3
+    assert h.pay().result()["reference"] == "BANK-7781"
     h.assert_no_leaks()
     write_report(
         "test_08_payment_limit",
@@ -36,11 +40,11 @@ def test_limit_selects_the_group(harness: Harness):
         __doc__ or "",
         h,
         "PASS: the controller was refused above the limit with the amount read from the ledger; "
-        "the CFO's approval paid the run.",
+        "the CFO's approval sent the run to the bank and the bank's confirmation paid it.",
         [
             "the pending line names the group the total requires",
             "a controller above the limit is refused with the amount and the limit",
-            "the cfo's approval pays",
+            "the cfo's approval sends the run; the bank's confirmation pays it",
         ],
     )
 
@@ -53,4 +57,6 @@ def test_under_the_limit_a_controller_may_approve(harness: Harness):
     fx = h.propose_pay(invoices=["INV-1042", "INV-1043"])
     assert "one cfo or controllers approver (under 10,000.00 USD)" in _post(fx).text
     h.approve_pay("m-ctrl-ok", sender=LEONARDO)
+    assert h.pay().state.value == "sent" and h.sent() == ["INV-1042", "INV-1043"]
+    h.confirm_pay("m-bank-ok", sender=LEONARDO)
     assert h.pay().state.value == "paid" and h.paid() == ["INV-1042", "INV-1043"]

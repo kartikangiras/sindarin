@@ -30,7 +30,17 @@ def test_lock_follows_the_paid_run_in_its_room(harness: Harness):
     )
     fx = h.propose_pay(room=CLOSE_ROOM, mid="m-pay-wrong")
     assert _post(fx).text == "Proposal not recorded — I take pay proposals in #payments only."
-    h.run_pay_gate()
+    # the run approved and sent to the bank is still not paid: no lock yet
+    h.propose_pay()
+    h.approve_pay()
+    assert h.pay().state.value == "sent"
+    assert (
+        "PAY-1 is sent, not paid; the lock follows the bank's confirmation"
+        in _post(h.propose_lock(mid="m-lock-before-bank")).text
+    )
+    h.confirm_pay()
+    h.sweep("sweep: stage lines")
+    assert h.pay().state.value == "paid"
     h.propose_lock()
     fx = h.approve_lock("m-wrong", sender=LEONARDO, room=PAYMENTS, thread=None)
     assert _post(fx).text == "**LOCK-1** not applied — I take lock commands in #close-2026-10 only."
@@ -53,7 +63,7 @@ def test_lock_follows_the_paid_run_in_its_room(harness: Harness):
         "PASS: every out-of-order or wrong-room step was refused; the period locked only after "
         "its run was paid and only from its own room.",
         [
-            "a lock before the plan, or before the run is paid, is refused",
+            "a lock before the plan, before the run is sent, or before the bank confirms it, is refused",
             "a proposal or an approve in the wrong room is refused and names the room",
             "the lock posts the entries, locks the period and finishes the plan",
         ],

@@ -19,7 +19,7 @@ from sindarin.adapters.base import ActionResult, Adapter, AdapterError, Facts, V
 from sindarin.executor import commands as cmd
 from sindarin.executor import core
 from sindarin.policy import Policy, load_policy
-from sindarin.schema import PROPOSAL_FENCE, Artifact, AuditEntry, has_fence, utcnow
+from sindarin.schema import PROPOSAL_FENCE, Artifact, AuditEntry, has_fence, money, utcnow
 from sindarin.store import MessageRecord, Store
 from sindarin.switch.events import MessageEvent
 from sindarin.users import Users, load_users
@@ -72,6 +72,7 @@ class Effector:
         *,
         ledger: Any | None = None,
         files: FilePoster | None = None,
+        pack: Any | None = None,
     ) -> None:
         self.store = store
         self.adapters = dict(adapters)
@@ -80,6 +81,7 @@ class Effector:
         self.clock = clock
         self.ledger = ledger  # a read-only handle for reports (sindarin-switch)
         self.files = files
+        self.pack = pack  # a GoogleDocs when the board pack goes to Drive (sindarin-switch)
         self._file_cache: dict[Path, tuple[int, Any]] = {}
 
     # -- context ------------------------------------------------------------------------------
@@ -244,6 +246,20 @@ class Effector:
                     applied.extend(self._run_report(e))
                 case core.RunAudit():
                     applied.extend(self._run_audit(e))
+                case core.ConfirmPaid():
+                    applied.extend(self._confirm_paid(e))
+                case core.PollPayment(artifact_id=aid):
+                    applied.extend(self._poll_payment(aid))
+                case core.PollInvoice(artifact_id=aid):
+                    applied.extend(self._poll_invoice(aid))
+                case core.CrmSync():
+                    applied.extend(self._crm_sync(e))
+                case core.SendContract(artifact_id=aid):
+                    applied.extend(self._send_contract(aid))
+                case core.PollSignature(artifact_id=aid):
+                    applied.extend(self._poll_signature(aid))
+                case core.BuildPack():
+                    applied.extend(self._build_pack(e))
         return applied
 
     # -- the audit trail ----------------------------------------------------------------------
@@ -660,6 +676,312 @@ class Effector:
         current = self.store.get(aid) or a
         return self.apply(core.after_execute(self.context(), current, result, verified))
 
+    def _confirm_paid(self, e: core.ConfirmPaid) -> list[core.Effect]:
+        """The bank's confirmation for a sent run, typed by a person: the payables become paid,
+        the payments are booked, the artifact lands in PAID."""
+        a = self.store.get(e.artifact_id)
+        adapter = self.adapters.get("ledger")
+        if a is None or adapter is None or not hasattr(adapter, "confirm"):
+            return self.apply(
+                [
+                    core.Post(
+                        e.room_id,
+                        f"**{e.artifact_id}** not confirmed — no ledger here.",
+                        e.thread_id,
+                    )
+                ]
+            )
+        try:
+            data = adapter.confirm(a.id, e.reference)
+        except AdapterError as exc:
+            return self.apply(
+                [
+                    core.Audit(
+                        "paid_refused",
+                        a.id,
+                        actor_id=e.actor_id,
+                        actor_name=e.actor_name,
+                        room_id=e.room_id,
+                        details={"error": str(exc)},
+                    ),
+                    core.Post(e.room_id, f"**{a.id}** not confirmed — {exc}.", e.thread_id),
+                ]
+            )
+        current = self.store.get(a.id) or a
+        return self.apply(
+            core.after_confirm(self.context(), current, data, actor_name=e.actor_name)
+        )
+
+    def _poll_payment(self, aid: str) -> list[core.Effect]:
+        """Where a sent run stands on its rail; book what the rail calls paid."""
+        a = self.store.get(aid)
+        adapter = self.adapters.get("ledger")
+        if a is None or adapter is None or not hasattr(adapter, "poll"):
+            return []
+        try:
+            data = adapter.poll(a.id)
+        except AdapterError as exc:
+            return self.apply([core.Audit("poll_failed", a.id, details={"error": str(exc)})])
+        except Exception as exc:  # the rail is a network; never let it kill the executor
+            log.exception("poll crashed")
+            return self.apply(
+                [core.Audit("poll_failed", a.id, details={"error": exc.__class__.__name__})]
+            )
+        effects: list[core.Effect] = []
+        if data.get("failed") and self.store.get_value(f"poll_failed:{a.id}") is None:
+            effects += [
+                core.SetValue(f"poll_failed:{a.id}", ", ".join(data["failed"])[:200]),
+                core.Post(
+                    a.room_id,
+                    f"**{a.id}** · {data.get('rail', 'the rail')} reports failed payouts: "
+                    f"{', '.join(data['failed'])}. The run stays open until they are retried.",
+                    a.thread_id,
+                ),
+            ]
+        if data.get("paid_now") or int(data.get("paid", 0)) >= len(a.proposal().body.run):
+            current = self.store.get(a.id) or a
+            effects += core.after_confirm(self.context(), current, data)
+        return self.apply(effects) if effects else []
+
+    def _poll_invoice(self, aid: str) -> list[core.Effect]:
+        """Whether a won deal's invoice is paid; the receipt is booked when it is."""
+        a = self.store.get(aid)
+        adapter = self.adapters.get("ledger")
+        if a is None or adapter is None or not hasattr(adapter, "poll_invoice"):
+            return []
+        invoice_id = str(a.result().get("invoice_id") or "")
+        try:
+            data = adapter.poll_invoice(a.proposal().body.deal_id, invoice_id)
+        except AdapterError as exc:
+            return self.apply([core.Audit("poll_failed", a.id, details={"error": str(exc)})])
+        except Exception as exc:  # the biller is a network; never let it kill the executor
+            log.exception("invoice poll crashed")
+            return self.apply(
+                [core.Audit("poll_failed", a.id, details={"error": exc.__class__.__name__})]
+            )
+        if not data.get("paid"):
+            return []
+        return self.apply(core.after_collect(self.context(), a, data))
+
+    # -- the connectors: the CRM, the signature, the board pack ----------------------------
+
+    def _crm_sync(self, e: core.CrmSync) -> list[core.Effect]:
+        """The deal into the CRM at its stage; a CRM failure is audited and, for a won deal,
+        said in the room, never a reason to touch the books."""
+        a = self.store.get(e.artifact_id)
+        adapter = self.adapters.get("ledger")
+        if a is None or adapter is None or getattr(adapter, "crm", None) is None:
+            return []
+        known = self.store.get_value(f"crm:{a.id}")
+        try:
+            data = adapter.crm_sync(a, e.stage, known_id=known)
+        except AdapterError as exc:
+            out: list[core.Effect] = [
+                core.Audit("crm_failed", a.id, details={"stage": e.stage, "error": str(exc)})
+            ]
+            if e.stage != "open":
+                out.append(
+                    core.Post(a.room_id, f"**{a.id}** CRM not updated — {exc}.", a.thread_id)
+                )
+            return self.apply(out)
+        except Exception as exc:  # the CRM is a network; never let it kill the executor
+            log.exception("crm sync crashed")
+            return self.apply(
+                [
+                    core.Audit(
+                        "crm_failed",
+                        a.id,
+                        details={"stage": e.stage, "error": exc.__class__.__name__},
+                    )
+                ]
+            )
+        body: Any = a.proposal().body
+        name = str(data.get("crm_name") or "the CRM")
+        url = str(data.get("crm_url") or "")
+        link = f" · {url}" if url else ""
+        if e.stage == "open":
+            text = f"**{a.id}** tracked in {name} at {data.get('crm_stage', 'open')}{link}"
+        elif e.stage == "won":
+            amount = money(int(body.price_cents), body.currency)
+            text = f"**{a.id}** {name} deal closed won at {amount}{link}"
+        else:
+            text = f"**{a.id}** {name} deal closed lost{link}"
+        return self.apply(
+            [
+                core.SetValue(f"crm:{a.id}", str(data.get("crm_deal_id") or "")),
+                core.Audit("crm_synced", a.id, details={"stage": e.stage, **data}),
+                core.Post(a.room_id, text, a.thread_id),
+            ]
+        )
+
+    def _send_contract(self, aid: str) -> list[core.Effect]:
+        """The won deal's order form out for signature, once."""
+        a = self.store.get(aid)
+        adapter = self.adapters.get("ledger")
+        if a is None or adapter is None or getattr(adapter, "esign", None) is None:
+            return []
+        if self.store.get_value(f"esign:{a.id}") is not None:
+            return []
+        try:
+            data = adapter.send_contract(a)
+        except AdapterError as exc:
+            return self.apply(
+                [
+                    core.Audit("contract_failed", a.id, details={"error": str(exc)}),
+                    core.Post(a.room_id, f"**{a.id}** order form not sent — {exc}.", a.thread_id),
+                ]
+            )
+        except Exception as exc:
+            log.exception("send contract crashed")
+            return self.apply(
+                [core.Audit("contract_failed", a.id, details={"error": exc.__class__.__name__})]
+            )
+        mode = " (test mode)" if data.get("test_mode") else ""
+        return self.apply(
+            [
+                core.SetValue(f"esign:{a.id}", str(data.get("signature_request_id") or "")),
+                core.Audit("contract_sent", a.id, details=dict(data)),
+                core.Post(
+                    a.room_id,
+                    f"**{a.id}** order form sent to {data.get('signer', 'the customer')} for "
+                    f"signature via {data.get('provider', 'Dropbox Sign')}{mode} · request "
+                    f"**{data.get('signature_request_id', '')}** · I check it until it is signed.",
+                    a.thread_id,
+                ),
+            ]
+        )
+
+    def _poll_signature(self, aid: str) -> list[core.Effect]:
+        a = self.store.get(aid)
+        adapter = self.adapters.get("ledger")
+        request_id = self.store.get_value(f"esign:{aid}")
+        if a is None or adapter is None or not request_id or not hasattr(adapter, "poll_contract"):
+            return []
+        try:
+            data = adapter.poll_contract(request_id)
+        except AdapterError as exc:
+            return self.apply([core.Audit("poll_failed", a.id, details={"error": str(exc)})])
+        except Exception as exc:
+            log.exception("signature poll crashed")
+            return self.apply(
+                [core.Audit("poll_failed", a.id, details={"error": exc.__class__.__name__})]
+            )
+        if data.get("declined"):
+            return self.apply(
+                [
+                    core.SetValue(f"signed:{a.id}", "declined"),
+                    core.Audit("contract_declined", a.id, details=dict(data)),
+                    core.Post(
+                        a.room_id,
+                        f"**{a.id}** order form declined by the signer. The deal stays won on the "
+                        "books; the CFO decides what follows.",
+                        a.thread_id,
+                    ),
+                ]
+            )
+        if not data.get("complete"):
+            return []
+        when = f" at {data['signed_at']}" if data.get("signed_at") else ""
+        return self.apply(
+            [
+                core.SetValue(f"signed:{a.id}", str(data.get("signed_at") or "signed")),
+                core.Audit("contract_signed", a.id, details=dict(data)),
+                core.Post(
+                    a.room_id,
+                    f"**{a.id}** order form signed by {data.get('signed_by') or 'the signer'}"
+                    f"{when} · request **{request_id}**.",
+                    a.thread_id,
+                ),
+            ]
+        )
+
+    def _build_pack(self, e: core.BuildPack) -> list[core.Effect]:
+        """The month's report, charts and exports into Drive and a Slides deck."""
+        from sindarin import reports
+        from sindarin.agents.finance import month_label, report_lines
+
+        if self.pack is None:
+            if e.auto:
+                return []
+            return self.apply(
+                [
+                    core.Post(
+                        e.room_id,
+                        "No board pack destination is set: put SINDARIN_GOOGLE_SA and "
+                        "GOOGLE_DRIVE_FOLDER_ID in .env, then `uv run sindarin connect drive`.",
+                        e.thread_id,
+                    )
+                ]
+            )
+        if self.ledger is None:
+            return self.apply([core.Post(e.room_id, "No ledger here to pack.", e.thread_id)])
+        try:
+            if e.period not in self.ledger.periods():
+                raise reports.ReportError(f"the ledger has no period {e.period}")
+            label = month_label(e.period)
+            summary = self.ledger.summary(e.period)
+            text = reports.report(self.ledger, e.period).text
+            charts: list[tuple[str, bytes, str, str]] = []
+            for kind in CHART_ORDER:
+                try:
+                    png = reports.chart_png(self.ledger, e.period, kind)
+                except reports.ReportError:
+                    continue
+                caption = png.text.split(".**")[0].strip("*")
+                charts.append((caption, png.data, png.mime, png.filename))
+            exports: list[tuple[str, bytes, str]] = []
+            for table in reports.EXPORTS:
+                try:
+                    out = reports.export(self.ledger, e.period, table)
+                except reports.ReportError:
+                    continue
+                exports.append((out.filename, out.data, out.mime))
+            built = self.pack.board_pack(
+                e.period,
+                label,
+                report_lines=report_lines(summary),
+                charts=charts,
+                exports=exports,
+                report_text=text,
+            )
+        except reports.ReportError as exc:
+            return self.apply([core.Post(e.room_id, f"**pack {e.period}** — {exc}.", e.thread_id)])
+        except Exception as exc:
+            log.warning("board pack failed: %s", str(exc)[:160])
+            return self.apply(
+                [
+                    core.Audit(
+                        "pack_failed", details={"period": e.period, "error": str(exc)[:160]}
+                    ),
+                    core.Post(
+                        e.room_id,
+                        f"**pack {e.period}** — not built: {str(exc)[:160]}.",
+                        e.thread_id,
+                    ),
+                ]
+            )
+        return self.apply(
+            [
+                core.Audit(
+                    "pack_built",
+                    actor_id=e.actor_id or None,
+                    actor_name=e.actor_name or None,
+                    room_id=e.room_id,
+                    details={
+                        "period": e.period,
+                        **{k: v for k, v in built.items() if "link" not in k},
+                    },
+                ),
+                core.Post(
+                    e.room_id,
+                    f"**{label} board pack** · deck {built.get('deck_link', '')} · files "
+                    f"{built.get('folder_link', '')} · {built.get('files', 0)} files, "
+                    f"{built.get('slides', 0)} slides, from the books.",
+                    e.thread_id,
+                ),
+            ]
+        )
+
     def _verify(self, aid: str) -> list[core.Effect]:
         a = self.store.get(aid)
         if a is None:
@@ -680,7 +1002,7 @@ class Effector:
 
 def _compact(details: Mapping[str, Any], limit: int = 110) -> str:
     """Audit details as `key=value` pairs a person can read; digests and ids stay out."""
-    skip = {"digest", "snapshot", "fence", "room_id", "url"}
+    skip = {"digest", "snapshot", "fence", "room_id", "url", "document_csv", "references"}
     parts = []
     for k, v in details.items():
         if k in skip or k.endswith(("_sha", "_id")) or v in (None, "", [], {}):

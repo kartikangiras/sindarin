@@ -230,7 +230,14 @@ def run_close_chain(stage: Stage, *, amend: bool) -> None:
         stage.watch("payments", until=r"the ledger changed since the proposal")
         stage.watch("payments", until=r"\*\*PAY-\d+\*\* pending \(revised", wait=stage.wait * 2)
     stage.say("john", "payments", f"@sindarin-ledger approve {pay}", root_id=root)
-    stage.watch("payments", until=r"approved by John · paid", wait=stage.wait * 2)
+    done = stage.watch("payments", until=r"approved by John · (sent to|paid )", wait=stage.wait * 2)
+    if done and any(
+        "sent to" in p.get("message", "") for p in (done if isinstance(done, list) else [done])
+    ):
+        stage.say("vincent", "payments", f"@sindarin-ledger paid {pay} BANK-7781", root_id=root)
+        stage.watch("payments", until=r"is not in the cfo or controllers group")
+        stage.say("john", "payments", f"@sindarin-ledger paid {pay} BANK-7781", root_id=root)
+        stage.watch("payments", until=r"\*\*PAY-\d+\*\* paid by John", wait=stage.wait * 2)
     posts = stage.watch(close_room, until=r"\*\*LOCK-\d+\*\* pending", wait=stage.wait * 2)
     lock = pending_id(posts, "LOCK", "LOCK-1")
     root = stage.proposal_root(close_room)

@@ -566,9 +566,23 @@ class Harness:
         assert a is not None and a.state.value == "open", a
         return a
 
+    def confirm_pay(
+        self,
+        mid: str = "m-paid",
+        *,
+        sender: str = JOHN,
+        aid: str = "PAY-1",
+        reference: str = "BANK-7781",
+        room: str = PAYMENTS,
+        thread: str | None = "m-pay-1",
+    ) -> list[core.Effect]:
+        """The bank has paid the sent run: a person in the approver groups types its reference."""
+        return self.command(mid, f"paid {aid} {reference}", sender=sender, room=room, thread=thread)
+
     def run_pay_gate(self, *, sender: str = JOHN) -> Artifact:
         self.propose_pay()
         self.approve_pay(sender=sender)
+        self.confirm_pay(sender=sender)
         self.sweep("sweep: stage lines")
         a = self.pay()
         assert a is not None, "no PAY-1"
@@ -585,6 +599,9 @@ class Harness:
 
     def paid(self) -> list[str]:
         return [r["invoice"] for r in self.books.payables(period=BASIS) if r["status"] == "paid"]
+
+    def sent(self) -> list[str]:
+        return [r["invoice"] for r in self.books.payables(period=BASIS) if r["status"] == "sent"]
 
     def sweep(self, label: str = "sweep") -> list[core.Effect]:
         effects = self.switch.sweep() + self.ledger.sweep()
