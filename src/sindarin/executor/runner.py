@@ -27,6 +27,7 @@ from sindarin.users import Users, load_users
 log = logging.getLogger("sindarin.runner")
 
 Poster = Callable[[str, str, str | None], None]
+CHART_ORDER = ("revenue", "budget", "target", "costs", "deals")  # a report's charts, in order
 
 
 @dataclass
@@ -352,37 +353,53 @@ class Effector:
                 [core.Post(e.room_id, f"**{e.what} {e.period}** — could not render.", e.thread_id)]
             )
         posted_file = False
-        charts: list[tuple[str, bytes, str]] = []
+        charts: list[reports.Output] = []
+        extra: list[core.Effect] = []
         if e.what == "report" and self.files is not None:
-            # the month's charts ride along with the report, the ones the month has data for
-            for kind in ("revenue", "budget", "target", "costs", "deals"):
+            # the text first, then each chart as its own message so it renders inline and
+            # large, the way a person would paste it, rather than as a strip of thumbnails
+            extra.append(core.Post(e.room_id, out.text, e.thread_id))
+            for kind in CHART_ORDER:
                 try:
-                    png = reports.chart_png(self.ledger, e.period, kind)
-                    charts.append((png.filename, png.data, png.mime))
+                    charts.append(reports.chart_png(self.ledger, e.period, kind))
                 except reports.ReportError:
                     continue
                 except Exception as exc:
                     log.warning("chart %s failed: %s", kind, exc.__class__.__name__)
-            if charts and hasattr(self.files, "post_files"):
+            for png in charts:
                 try:
-                    posted_file = self.files.post_files(e.room_id, out.text, charts, e.thread_id)
+                    posted_file = (
+                        self.files.post_file(
+                            e.room_id, png.text, png.filename, png.data, png.mime, e.thread_id
+                        )
+                        or posted_file
+                    )
                 except Exception as exc:
-                    log.warning("report charts not attached: %s", str(exc)[:120])
-        if out.data and self.files is not None:
+                    log.warning("report chart not attached: %s", str(exc)[:120])
+            posted_file = True  # the text went out as a post; the charts are best effort
+        elif out.data and self.files is not None:
             try:
                 posted_file = self.files.post_file(
                     e.room_id, out.text, out.filename, out.data, out.mime, e.thread_id
                 )
             except Exception as exc:
                 log.warning("file post failed: %s", str(exc)[:120])
+            if posted_file and e.what == "chart" and out.facts.get("reading"):
+                extra.append(core.Post(e.room_id, str(out.facts["reading"]), e.thread_id))
         effects: list[core.Effect] = [
             core.Audit(
                 f"{e.what}_posted",
                 actor_id=e.actor_id,
                 actor_name=e.actor_name,
                 room_id=e.room_id,
-                details={**out.facts, "rows": out.rows, "file": posted_file, "charts": len(charts)},
-            )
+                details={
+                    **{k: v for k, v in out.facts.items() if k != "reading"},
+                    "rows": out.rows,
+                    "file": posted_file,
+                    "charts": len(charts),
+                },
+            ),
+            *extra,
         ]
         if not posted_file:
             text = out.text

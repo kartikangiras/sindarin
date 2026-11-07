@@ -103,7 +103,10 @@ def test_commands_render_through_sindarin_switch(harness: Harness):
     files = _Files()
     h.switch.files = files
     fx = h.command("r6", "chart 2026-10 costs", sender=JOHN, room=FINANCE, executor=SWITCH_EXECUTOR)
-    assert [e for e in fx if isinstance(e, core.Post)] == []
+    # the image carries its caption; the one-line reading follows it in the thread
+    assert [e.text for e in fx if isinstance(e, core.Post)] == [
+        "WeWork is 56% of the month's costs; 14,250.00 USD in 3 payables still open."
+    ]
     assert files.posted[-1][1:3] == ("costs-2026-10.png", "image/png")
     h.command("r7", "export 2026-10 sales", sender=JOHN, room=FINANCE, executor=SWITCH_EXECUTOR)
     assert files.posted[-1][1:3] == ("sales-2026-10.csv", "text/csv")
@@ -127,20 +130,25 @@ class _MultiFiles(_Files):
 
 
 def test_a_report_carries_the_months_charts(harness: Harness):
-    """`report` goes out as one message with the charts the month has data for attached; a
-    month without a budget or deals gets only revenue, target and costs."""
+    """`report` goes out as its text, then one message per chart so each renders inline and
+    large; a month without a budget or deals gets only revenue, target and costs."""
     h = harness
     h.switch.ledger = Ledger(h.books.path, readonly=True)
-    files = _MultiFiles()
+    files = _Files()
     h.switch.files = files
     fx = h.command("rc1", "report 2026-10", sender=JOHN, room=FINANCE, executor=SWITCH_EXECUTOR)
-    assert [e for e in fx if isinstance(e, core.Post)] == []
-    room, text, names = files.bundles[-1]
-    assert room == FINANCE and text.startswith("**October 2026** · revenue **89,905.00 USD**")
-    assert names == ["revenue-2026-10.png", "target-2026-10.png", "costs-2026-10.png"]
+    posts = [e for e in fx if isinstance(e, core.Post)]
+    assert len(posts) == 1 and posts[0].text.startswith(
+        "**October 2026** · revenue **89,905.00 USD**"
+    )
+    assert [name for _, name, _, _ in files.posted[-3:]] == [
+        "revenue-2026-10.png",
+        "target-2026-10.png",
+        "costs-2026-10.png",
+    ]
     audit = [e for e in fx if isinstance(e, core.Audit) and e.event == "report_posted"][0]
     assert audit.details["charts"] == 3 and audit.details["file"] is True
-    # a poster that cannot bundle files still gets the text report
-    h.switch.files = _Files()
+    # without a file poster the text report still goes out
+    h.switch.files = None
     fx = h.command("rc2", "report 2026-10", sender=JOHN, room=FINANCE, executor=SWITCH_EXECUTOR)
     assert "**October 2026**" in [e for e in fx if isinstance(e, core.Post)][0].text
