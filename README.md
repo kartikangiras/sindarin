@@ -69,6 +69,13 @@ report still happens. `scripts/demo.sh stop` stops the processes, and `scripts/r
 
 ## How Switch is used
 
+The Switch surface the project stands on, as one turning scene: Switch at the core, every
+primitive the project uses on the inner ring, what Sindarin does with each on the outer ring,
+and the chat apps the collaboration bridge carries behind it. The live version, with every node
+explained on hover, is on the [landing page](https://sindarin-nu.vercel.app/#switch).
+
+![Sindarin on Switch: participant identity, rooms, members, instructions, documents, links, groups, attachments, budgets, addressing, the event stream, the agent protocol, the Gateway, the Console and the bridge](docs/brand/switch-map.gif)
+
 - **Identity.** Every event carries a Switch participant id. Approver groups, proposers and
   executors are lists of ids in `agents/policy/policy.yaml`; display names are never consulted.
   An impostor named "Isaac" gets the same refusal as the sales person.

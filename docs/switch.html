@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sindarin on Switch</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; color: #e5e7eb; font-family: Inter, ui-sans-serif, system-ui, sans-serif; overflow: hidden; }
+  #map { position: absolute; inset: 0; }
+  #legend { position: absolute; left: 18px; bottom: 16px; display: grid; gap: 6px; font-size: 12px; color: #9ca3af; background: rgba(0,0,0,.55); padding: 10px 12px; border: 1px solid rgba(255,255,255,.1); border-radius: 10px; }
+  #legend span { display: inline-flex; align-items: center; gap: 8px; }
+  #legend i { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+  #title { position: absolute; left: 18px; top: 16px; font-size: 13px; color: #9ca3af; letter-spacing: .02em; }
+  #title b { color: #fff; font-weight: 600; margin-right: 8px; }
+  #rings { position: absolute; right: 18px; bottom: 16px; font-size: 12px; color: #9ca3af; background: rgba(0,0,0,.55); padding: 10px 12px; border: 1px solid rgba(255,255,255,.1); border-radius: 10px; display: grid; gap: 4px; text-align: right; }
+  #rings b { color: #e5e7eb; font-weight: 500; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="title"><b>Sindarin on Switch</b> every Switch primitive the project uses, and what it does with it</div>
+<div id="legend"></div>
+<div id="rings"><span><b>core</b> Switch</span><span><b>inner ring</b> the primitives</span><span><b>outer ring</b> what Sindarin does with each</span><span><b>behind the bridge</b> the chat apps</span></div>
+<script src="https://unpkg.com/three@0.159.0/build/three.min.js"></script>
+<script src="https://unpkg.com/3d-force-graph@1.73.4/dist/3d-force-graph.min.js"></script>
+<script src="https://unpkg.com/three-spritetext@1.8.2/dist/three-spritetext.min.js"></script>
+<script src="switch-map.js"></script>
+<script>
+  var capture = /[?&]capture=1/.test(location.search);
+  var el = document.getElementById("map");
+  renderSwitchMap(el, { autoRotate: !capture, height: el.clientHeight, exposeAs: "__map" });
+  var legend = document.getElementById("legend");
+  (window.SWITCH_MAP_LEGEND || []).forEach(function (row) {
+    var s = document.createElement("span"); var i = document.createElement("i"); i.style.background = row[1];
+    s.appendChild(i); s.appendChild(document.createTextNode(row[0])); legend.appendChild(s);
+  });
+</script>
+</body>
+</html>

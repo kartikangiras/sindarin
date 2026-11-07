@@ -683,6 +683,16 @@ function Switch() {
         <h2 className="text-4xl md:text-5xl font-semibold tracking-tight mb-5">Remove Switch and nothing is left to <span className="font-serif italic font-normal">verify.</span></h2>
         <p className="text-gray-400 text-lg">Switch is the identity every refusal is built on, the transport, the rooms and the record. Mattermost is only what the people look at.</p>
       </FadeInUp>
+      <FadeInUp className="mb-14">
+        <div className="relative rounded-3xl border border-white/10 bg-[#050506] overflow-hidden">
+          <video autoPlay muted loop playsInline preload="metadata" poster="brand/switch-map.jpg" className="w-full aspect-video object-cover" aria-label="The Switch surface Sindarin stands on, as a turning 3D scene">
+            <source src="brand/switch-map.webm" type="video/webm" />
+            <source src="brand/switch-map.mp4" type="video/mp4" />
+          </video>
+          <a href="switch.html" target="_blank" rel="noopener" className="absolute right-4 bottom-4 text-xs text-gray-300 bg-black/60 border border-white/10 rounded-xl px-3 py-2 hover:text-white hover:border-white/30 transition-colors">Open the live 3D scene</a>
+        </div>
+        <p className="text-xs text-gray-500 mt-3">Switch at the core. The inner ring is every Switch primitive the project uses, the outer ring is what Sindarin does with each, and the chat apps the collaboration bridge carries sit behind it. Hover a node on the live scene for the detail.</p>
+      </FadeInUp>
       <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-5">
         {SWITCH.map(([t, d], i) => (
           <FadeInUp key={t} delay={(i % 4) * 80} className="h-full">
