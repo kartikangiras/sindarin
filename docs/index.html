@@ -43,6 +43,10 @@
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/three@0.159.0/build/three.min.js"></script>
+<script src="https://unpkg.com/3d-force-graph@1.73.4/dist/3d-force-graph.min.js"></script>
+<script src="https://unpkg.com/three-spritetext@1.8.2/dist/three-spritetext.min.js"></script>
+<script src="map.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@7.24.7/babel.min.js"></script>
 <script type="text/babel" data-presets="react">
 const { useState, useEffect, useRef } = React;
@@ -155,6 +159,7 @@ function CopyButton({ text, label = "Copy" }) {
 
 const NAV = [
   ["about", "About"],
+  ["map", "Map"],
   ["workflows", "Workflows"],
   ["agents", "Agents"],
   ["commands", "Commands"],
@@ -345,6 +350,47 @@ function Feature({ id, badge, badgeColor, title, text, cta, ctaId, mockup, flip 
   );
 }
 
+/* ---------- the map ---------- */
+
+function ProjectMap() {
+  const ref = useRef(null);
+  const [state, setState] = useState("loading");
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    if (!window.renderSindarinMap || !window.ForceGraph3D) { setState("failed"); return; }
+    try {
+      const handle = window.renderSindarinMap(el, { autoRotate: true, height: el.clientHeight || 560 });
+      setState(handle ? "ready" : "failed");
+      return () => handle && handle.stop && handle.stop();
+    } catch (e) { setState("failed"); }
+  }, []);
+  const legend = window.SINDARIN_MAP_LEGEND || [];
+  return (
+    <section id="map" className="py-24 px-6 max-w-7xl mx-auto">
+      <FadeInUp className="max-w-3xl mb-10">
+        <div className="mb-6"><Badge color="text-sky-300">✨ The whole thing on one map</Badge></div>
+        <h2 className="text-4xl md:text-5xl font-semibold tracking-tight mb-5">Three chains, seven gates, two executors, one <span className="font-serif italic font-normal">record.</span></h2>
+        <p className="text-gray-400 text-lg">People ask, agents draft, named groups approve in named rooms, deterministic executors move the books, and everything hangs off Switch. Drag to turn it, scroll to zoom, hover a node to see its neighbours and what it does.</p>
+      </FadeInUp>
+      <FadeInUp>
+        <div className="relative rounded-3xl border border-white/10 bg-[#050506] overflow-hidden">
+          <div ref={ref} className="w-full h-[480px] md:h-[600px]" />
+          {state === "failed" && (
+            <div className="absolute inset-0 flex items-center justify-center text-sm text-gray-400 px-6 text-center">The 3D map needs WebGL. The README carries a recorded clip of it.</div>
+          )}
+          <div className="absolute left-4 bottom-4 grid gap-1.5 text-xs text-gray-400 bg-black/60 border border-white/10 rounded-xl px-3 py-2.5 pointer-events-none">
+            {legend.map(([label, color]) => (
+              <span key={label} className="inline-flex items-center gap-2"><i className="inline-block w-2.5 h-2.5 rounded-full" style={{ background: color }} />{label}</span>
+            ))}
+          </div>
+        </div>
+        <p className="text-xs text-gray-500 mt-3">Solid arrows are the flow of a chain: sky for the plan, amber for the close, green for the deals, grey for the record. Dashed lines say who approves a gate, and the checks that run on every approve. Thin lines tie everything to Switch.</p>
+      </FadeInUp>
+    </section>
+  );
+}
+
 /* ---------- workflows ---------- */
 
 const CHAINS = [
@@ -514,7 +560,7 @@ const COMMANDS = [
     who: "from any room, read-only, from the ledger",
     cols: ["Command", "What happens", "Answered by"],
     rows: [
-      ["report <period>", "The month against its targets, the recorded budget, the planned amounts, budget against actual once both exist.", "sindarin-switch"],
+      ["report <period>", "The month against its targets, the recorded budget, the planned amounts, budget against actual once both exist, with the month's charts attached as PNGs.", "sindarin-switch"],
       ["export <period> sales|payables|budget|planned|targets|deals|journal", "The table as a CSV file in the room.", "sindarin-switch"],
       ["chart <period> revenue|budget|costs|target|deals", "A bar chart PNG in the room; a text chart where files cannot be carried.", "sindarin-switch"],
       ["read <link> [tab]", "Any Google Sheet, Drive file, .xlsx or .csv: every tab, rows, columns, totals, date ranges, repeated invoices, missing columns, and whether the books can take it. With a tab name, its rows as a table plus the whole tab as a CSV.", "sindarin-switch"],
@@ -533,7 +579,8 @@ const COMMANDS = [
       ["scripts/dev_stack.sh start [--fake] | stop | status", "The seven processes alone; --fake runs the agents on the stand-in model.", ""],
       ["scripts/reset_demo.sh [--rooms]", "Wipes executor state, reloads the ledger, removes the rooms a run opened.", ""],
       ["uv run python scripts/rehearse.py --chain plan|close|sales", "Plays the four-person team through a chain against the live stack, refusals included.", ""],
-      ["uv run pytest", "186 tests, eleven of them adversarial, each writing a transcript to validation/reports/.", ""],
+      ["uv run sindarin people add <user> --groups cfo,controllers | list | remove", "A colleague into every room and the groups named; their participant id into the policy, which the executors reload on their own.", ""],
+      ["uv run pytest", "194 tests, eleven of them adversarial, each writing a transcript to validation/reports/.", ""],
       ["uv run sindarin doctor", "Says what is missing, if anything is.", ""],
     ],
   },
@@ -547,7 +594,7 @@ function Commands() {
       <FadeInUp className="max-w-3xl mb-12">
         <div className="mb-6"><Badge color="text-amber-300">✨ Commands</Badge></div>
         <h2 className="text-4xl md:text-5xl font-semibold tracking-tight mb-5">Everything you can <span className="font-serif italic font-normal">type.</span></h2>
-        <p className="text-gray-400 text-lg">Agents answer to a mention; executors answer to a command. Ids are GOALS-n, BUDGET-n, ENTRIES-n for the plan, CLOSE-n, PAY-n, LOCK-n for the close and DEAL-n for sales. A trailing full stop changes nothing. A bare mention of an executor returns its help.</p>
+        <p className="text-gray-400 text-lg">Agents answer to a mention; executors answer to a command. Ids are GOALS-n, BUDGET-n, ENTRIES-n for the plan, CLOSE-n, PAY-n, LOCK-n for the close and DEAL-n for sales. Reading commands take month names and plain phrasing; approvals are exact, by design. A bare mention of an executor returns its help.</p>
       </FadeInUp>
       <FadeInUp>
         <div className="flex flex-wrap gap-2 mb-6">
@@ -722,8 +769,8 @@ const TEAM_STEPS = [
   },
   {
     title: "Decide who approves",
-    text: "Groups are lists of Switch participant ids in agents/policy/policy.yaml: cfo, controllers, board. whoami tells anyone their id. The limits live beside the groups and the executors reload the file when it changes.",
-    code: ["@sindarin-switch whoami", "# policy.yaml: groups.cfo, groups.controllers, groups.board", "# limits: budget 10,000.00 · payment run 10,000.00 · discount 1,000.00 USD"],
+    text: "Add a colleague by Mattermost username and name the groups they approve for: the account is found or created, put in every room, and its participant id written into the policy, which the executors reload on their own. The limits sit beside the groups in agents/policy/policy.yaml and are yours to change.",
+    code: ["uv run sindarin people add alice --groups cfo,controllers", "uv run sindarin people list", "@sindarin-switch whoami", "# limits in policy.yaml: budget 10,000.00 · payment run 10,000.00 · discount 1,000.00 USD"],
   },
   {
     title: "Run your months",
@@ -904,7 +951,7 @@ function Footer() {
         <span className="hidden md:inline">·</span>
         <span>Built on <a href="https://www.switchagents.ai/" target="_blank" rel="noopener" className="text-gray-300 hover:text-white">Switch</a></span>
         <span className="hidden md:inline">·</span>
-        <span>186 tests · 11 adversarial · 7 gates · 3 chains</span>
+        <span>194 tests · 11 adversarial · 7 gates · 3 chains</span>
       </div>
     </footer>
   );
@@ -939,6 +986,7 @@ function App() {
           mockup={<Mockup video={VIDEO.data}><ReadCard /></Mockup>}
           flip
         />
+        <ProjectMap />
         <Workflows />
         <Agents />
         <Commands />
