@@ -516,7 +516,7 @@ const COMMANDS = [
       ["scripts/reset_demo.sh [--rooms]", "Wipes executor state, reloads the ledger, removes the rooms a run opened.", ""],
       ["uv run python scripts/rehearse.py --chain plan|close|sales", "Plays the four-person team through a chain against the live stack, refusals included.", ""],
       ["uv run sindarin people add <user> --groups cfo,controllers | list | remove", "A colleague into every room and the groups named; their participant id into the policy, which the executors reload on their own.", ""],
-      ["uv run pytest", "194 tests, eleven of them adversarial, each writing a transcript to validation/reports/.", ""],
+      ["uv run pytest", "197 tests, eleven of them adversarial, each writing a transcript to validation/reports/.", ""],
       ["uv run sindarin doctor", "Says what is missing, if anything is.", ""],
     ],
   },
@@ -704,7 +704,7 @@ const DEMO_MORE = [
   ["uv run python scripts/rehearse.py --chain plan", "plays that team through a chain against the live stack, refusals included; also close and sales"],
   ["scripts/reset_demo.sh --rooms", "back to the start: executor state, the ledger, the rooms a run opened"],
   ["scripts/demo.sh stop", "stops the seven processes; Switch keeps running"],
-  ["uv run pytest", "194 tests, eleven of them adversarial, each writing a transcript to validation/reports/"],
+  ["uv run pytest", "197 tests, eleven of them adversarial, each writing a transcript to validation/reports/"],
 ];
 
 const TEAM_STEPS = [
@@ -848,7 +848,7 @@ function Run() {
               <CopyButton text={setupText} label="Copy the three lines" />
             </div>
             <CmdRows rows={SETUP} />
-            <p className="text-sm text-gray-400 mt-4">Then open <span className="text-white">http://localhost:8065</span>, team <span className="font-mono text-white">switch</span>, and sign in as <span className="font-mono text-white">user</span> with <span className="font-mono text-white">Sindarin-demo-1</span>. The bootstrap has put that account in every room and every approver group. Plan first, then close: a locked month takes no late sale.</p>
+            <p className="text-sm text-gray-400 mt-4">Then open <span className="text-white">http://localhost:8065</span>, team <span className="font-mono text-white">switch</span>, and sign in as <span className="font-mono text-white">user</span> with <span className="font-mono text-white">Sindarin-demo-1</span>. The bootstrap has put that account in every room and every approver group. Pick the executors from the autocomplete so the mention reads <span className="font-mono text-white">@sindarin-switch</span>: a display-name mention is not addressed to the bot and is ignored. Plan first, then close: a locked month takes no late sale.</p>
           </div>
           <div className="px-6 py-5 border-b border-white/10">
             <div className="text-xs text-gray-500 font-medium mb-3">in Mattermost, in this order</div>
@@ -978,7 +978,7 @@ function Footer() {
         <span className="hidden md:inline">·</span>
         <span>Built on <a href="https://www.switchagents.ai/" target="_blank" rel="noopener" className="text-gray-300 hover:text-white">Switch</a></span>
         <span className="hidden md:inline">·</span>
-        <span>194 tests · 11 adversarial · 7 gates · 3 chains</span>
+        <span>197 tests · 11 adversarial · 7 gates · 3 chains</span>
       </div>
     </footer>
   );

@@ -171,7 +171,9 @@ scripts/demo.sh                 # Switch + Mattermost in Docker, the ledger, the
 
 Open http://localhost:8065, team `switch`, and sign in as `user` with the password
 `Sindarin-demo-1`. The bootstrap has put that account in every room and every approver group.
-Then type, in order:
+Pick the executors from the autocomplete so the mention reads `@sindarin-switch` or
+`@sindarin-ledger`: a display-name mention such as `@Sindarin Switch` is not addressed to the bot
+and is ignored. Then type, in order:
 
 | Room | Type | What happens |
 |---|---|---|
@@ -196,7 +198,7 @@ PEOPLE=cast scripts/demo.sh            # adds a four-person team: CFO, controlle
 uv run python scripts/rehearse.py --chain plan   # plays that team through a chain, refusals included
 scripts/reset_demo.sh --rooms          # back to the start: executor state, the ledger, the opened rooms
 scripts/demo.sh stop                   # stops the seven processes; Switch keeps running
-uv run pytest                          # 194 tests, eleven of them adversarial
+uv run pytest                          # 197 tests, eleven of them adversarial
 ```
 
 ### Your team, your books
@@ -241,7 +243,9 @@ uv run sindarin doctor                 # says what is missing, if anything is
 
 **4. Load your numbers.** A Google Sheet shared by link, or an Excel workbook, with the tabs
 `accounts`, `sales`, `payables`, `targets` and, for deals, `price_book`; money as cents
-(`amount_cents`) or decimals (`amount`). Do it from chat or from the terminal.
+(`amount_cents`) or decimals (`amount`). Do it from chat or from the terminal. A file loaded twice
+is loaded once: the import replaces the sales of the months the file covers, so `demo.sh` can be
+run again over a loaded ledger.
 
 ```bash
 # in chat
@@ -283,7 +287,9 @@ grep -E '^GATEWAY_ADMIN_(EMAIL|PASSWORD)=' ~/.sindarin/switch-stack/.env
 
 Agents answer to a mention in words; executors answer to a command. Ids are `GOALS-n`,
 `BUDGET-n`, `ENTRIES-n` for the plan, `CLOSE-n`, `PAY-n`, `LOCK-n` for the close and `DEAL-n`
-for sales. A bare mention of an executor returns its help.
+for sales. A bare mention of an executor returns its help. Executors are mentioned by username,
+`@sindarin-switch` and `@sindarin-ledger`, as the autocomplete writes them; Switch delivers a
+display-name mention as not addressed and the executor ignores it.
 
 | Gate command | What happens | Answered by |
 |---|---|---|
