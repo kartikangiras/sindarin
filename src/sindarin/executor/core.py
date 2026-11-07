@@ -9,6 +9,7 @@ fences (§8). Nothing else is input. Natural language is never interpreted.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -185,6 +186,19 @@ class SetPrice:
 
 
 @dataclass(frozen=True)
+class RunAudit:
+    """Runner: the audit trail from the store(s): one artifact, or a month across both executors
+    when sindarin-switch answers in the finance room."""
+
+    target: str  # artifact id or period
+    with_peer: bool
+    room_id: str
+    thread_id: str | None
+    actor_id: str
+    actor_name: str
+
+
+@dataclass(frozen=True)
 class InspectFile:
     """Runner: fetch the file a person linked, describe it (or list one tab's entries), post."""
 
@@ -222,6 +236,7 @@ Effect = (
     | SetPrice
     | InspectFile
     | LoadBooks
+    | RunAudit
     | RunReport
 )
 
@@ -1021,6 +1036,10 @@ def _handle_command(ctx: Context, ev: MessageEvent) -> list[Effect]:
             return _price(ctx, ev, product, cents)
         case cmd.Read(url=url, tab=tab):
             return _read_file(ctx, ev, url, tab)
+        case cmd.Audit(target=target):
+            return _audit_trail(ctx, ev, target)
+        case cmd.Approvers(kind=kind_word):
+            return _approvers(ctx, ev, kind_word)
         case cmd.Load(url=url):
             return _load(ctx, ev, url)
         case cmd.Report(period=period):
@@ -1132,6 +1151,88 @@ def _price(ctx: Context, ev: MessageEvent, product: str, cents: int) -> list[Eff
         SetPrice(product, cents, ev.room_id, thread, ev.sender, name),
         _audit(ev, "price_requested", product=product, amount_cents=cents),
     ]
+
+
+def _audit_trail(ctx: Context, ev: MessageEvent, target: str) -> list[Effect]:
+    """`audit GOALS-1` is answered by the executor that holds the artifact; `audit 2026-10` by
+    sindarin-switch in the finance room with both executors' events, elsewhere by the executor
+    present with its own. One answer per room, never two."""
+    thread = _reply_thread(ev)
+    in_finance = bool(ev.room_id) and ev.room_id == ctx.policy.room_id("finance")
+    is_period = bool(re.fullmatch(r"\d{4}-\d{2}", target))
+    if is_period:
+        if ctx.executor == SWITCH_EXECUTOR and not in_finance:
+            return []  # the ledger executor is in this room and answers for its own events
+        return [
+            RunAudit(target, ctx.executor == SWITCH_EXECUTOR, ev.room_id, thread, ev.sender, ""),
+            _audit(ev, "audit_requested", target=target),
+        ]
+    own = ctx.view.get(target) is not None
+    if own:
+        return [
+            RunAudit(target, False, ev.room_id, thread, ev.sender, ""),
+            _audit(ev, "audit_requested", target=target),
+        ]
+    if ctx.executor == SWITCH_EXECUTOR and in_finance:
+        if any(a.id == target for a in ctx.peer_artifacts):
+            return [
+                RunAudit(target, True, ev.room_id, thread, ev.sender, ""),
+                _audit(ev, "audit_requested", target=target),
+            ]
+        return [Post(ev.room_id, f"**{target}** is unknown here.", thread_id=thread)]
+    if ctx.executor == LEDGER_EXECUTOR:
+        if not any(a.id == target for a in ctx.peer_artifacts):
+            return [Post(ev.room_id, f"**{target}** is unknown here.", thread_id=thread)]
+        shared = any(
+            a.kind in ROOM_KINDS and a.result().get("room_id") == ev.room_id
+            for a in ctx.peer_artifacts
+        )
+        if shared:
+            return []  # sindarin-switch opened this room, sits in it and answers
+        return [
+            Post(
+                ev.room_id,
+                f"**{target}** is kept by {SWITCH_EXECUTOR}: ask in "
+                f"{ctx.room_name(ctx.policy.room_id('finance'))}.",
+                thread_id=thread,
+            )
+        ]
+    return []  # the owner is in this room and answers
+
+
+def _approvers(ctx: Context, ev: MessageEvent, kind_word: str | None) -> list[Effect]:
+    """`who approves [<kind>]`: each executor answers for the kinds it owns, so a room with both
+    gets one answer per kind. Names are display only; the ids in the policy decide."""
+    thread = _reply_thread(ev)
+    wanted = [k for k in Kind if k.value == kind_word] if kind_word else list(Kind)
+    lines = []
+    for kind in wanted:
+        if kind not in ctx.kinds:
+            continue
+        for rule in ctx.policy.rules_for(kind):
+            groups = [rule.approvers] + (
+                [rule.approvers_under_limit] if rule.approvers_under_limit else []
+            )
+            who = rule.approvers
+            if rule.approvers_under_limit and rule.limit_cents is not None:
+                noun = "a discount" if kind is Kind.DEAL else "amounts"
+                who = (
+                    f"{rule.approvers}; {rule.approvers_under_limit} alone for {noun} up to "
+                    f"{money(rule.limit_cents, rule.currency)}"
+                )
+            room = (
+                ctx.room_name(ctx.policy.room_id(rule.room))
+                if rule.room != PERIOD_ROOM
+                else ("the plan room" if kind is Kind.ENTRIES else "the period room")
+            )
+            names = " · ".join(
+                f"{g}: {', '.join(ctx.name_of(p) for p in ctx.policy.group_members(g)) or 'nobody'}"
+                for g in groups
+            )
+            lines.append(f"**{kind.value}** · {who} · in {room} · {names}")
+    if not lines:
+        return []
+    return [Post(ev.room_id, "\n".join(lines), thread_id=thread)]
 
 
 def _read_file(ctx: Context, ev: MessageEvent, url: str, tab: str = "") -> list[Effect]:

@@ -232,6 +232,17 @@ def test_settle_waits_for_members_then_a_grace_period(monkeypatch):
     assert slept == [2.0]
 
 
+def test_a_mattermost_member_is_seated_from_the_id_itself():
+    """A colleague added after the bootstrap is not in the executor's directory; the id a
+    Mattermost member carries names them anyway. An agent still needs the directory."""
+    adapter = SwitchRoomsAdapter(FakeGateway(), bridge_id="b", directory={"@a:x": "agent-1"})
+    bridge = "b76af5d9-670f-4573-9f7b-6655cdb00753"
+    maria = f"@switch-mattermost-{bridge}-maria:localhost"
+    assert adapter._translate(["@a:x", maria, maria]) == ["agent-1", "maria"]
+    with pytest.raises(AdapterError, match="1 participant id\\(s\\) missing"):
+        adapter._translate(["@switch-agent-unknown:localhost"])
+
+
 class DressedGateway(FakeGateway):
     """A Gateway with the Switch components around a room: documents, links, groups."""
 

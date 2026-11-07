@@ -114,3 +114,33 @@ def test_commands_render_through_sindarin_switch(harness: Harness):
         "**chart 2027-01** — the ledger has no period 2027-01."
     ]
     h.switch.ledger.close()
+
+
+class _MultiFiles(_Files):
+    def __init__(self) -> None:
+        super().__init__()
+        self.bundles: list[tuple[str, str, list[str]]] = []
+
+    def post_files(self, room_id, text, files, thread_id) -> bool:
+        self.bundles.append((room_id, text, [name for name, _, _ in files]))
+        return True
+
+
+def test_a_report_carries_the_months_charts(harness: Harness):
+    """`report` goes out as one message with the charts the month has data for attached; a
+    month without a budget or deals gets only revenue, target and costs."""
+    h = harness
+    h.switch.ledger = Ledger(h.books.path, readonly=True)
+    files = _MultiFiles()
+    h.switch.files = files
+    fx = h.command("rc1", "report 2026-10", sender=JOHN, room=FINANCE, executor=SWITCH_EXECUTOR)
+    assert [e for e in fx if isinstance(e, core.Post)] == []
+    room, text, names = files.bundles[-1]
+    assert room == FINANCE and text.startswith("**October 2026** · revenue **89,905.00 USD**")
+    assert names == ["revenue-2026-10.png", "target-2026-10.png", "costs-2026-10.png"]
+    audit = [e for e in fx if isinstance(e, core.Audit) and e.event == "report_posted"][0]
+    assert audit.details["charts"] == 3 and audit.details["file"] is True
+    # a poster that cannot bundle files still gets the text report
+    h.switch.files = _Files()
+    fx = h.command("rc2", "report 2026-10", sender=JOHN, room=FINANCE, executor=SWITCH_EXECUTOR)
+    assert "**October 2026**" in [e for e in fx if isinstance(e, core.Post)][0].text

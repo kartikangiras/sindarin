@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from sindarin.names import EXECUTORS
 
@@ -90,6 +91,21 @@ class Load:
 
 
 @dataclass(frozen=True)
+class Audit:
+    """The audit trail (both executors): every event on one artifact, or a month's events. Who
+    proposed, who was refused and why, who approved by participant id, what was verified."""
+
+    target: str  # an artifact id (GOALS-1) or a period (2026-10)
+
+
+@dataclass(frozen=True)
+class Approvers:
+    """Who approves a kind of thing: the group, the limit and the names, read from the policy."""
+
+    kind: str | None = None  # goals | budget | entries | close | pay | lock | deal, or everything
+
+
+@dataclass(frozen=True)
 class Report:
     """The period as a person reads it (sindarin-switch, from the ledger, read-only)."""
 
@@ -125,6 +141,8 @@ Command = (
     | Price
     | Read
     | Load
+    | Audit
+    | Approvers
     | Report
     | Export
     | Chart
@@ -162,6 +180,14 @@ _TABLE: tuple[tuple[re.Pattern[str], type], ...] = (
         Read,
     ),
     (re.compile(r"^load\s+<?(https?://[^\s<>]+)>?$", re.IGNORECASE), Load),
+    (re.compile(rf"^audit\s+(?:{_ID}|(\d{{4}}-\d{{2}}))$", re.IGNORECASE), Audit),
+    (
+        re.compile(
+            r"^who approves(?:\s+(?:the\s+)?(goals|budget|entries|close|pay|lock|deal)s?)?$",
+            re.IGNORECASE,
+        ),
+        Approvers,
+    ),
     (re.compile(r"^report\s+(\d{4}-\d{2})$", re.IGNORECASE), Report),
     (re.compile(r"^export\s+(\d{4}-\d{2})\s+([a-z]{3,12})$", re.IGNORECASE), Export),
     (re.compile(r"^chart\s+(\d{4}-\d{2})\s+([a-z]{3,12})$", re.IGNORECASE), Chart),
@@ -176,8 +202,11 @@ HELP_TEXT = (
     "`read <link> [tab]` (any Google Sheet, Drive file, .xlsx or .csv: what it holds, what to "
     "fix; a tab's entries) · "
     "`load <link>` (the team's file into the books) · "
-    "`report <period>` · `export <period> sales|payables|budget|planned|targets|deals|journal` · "
-    "`chart <period> revenue|budget|costs|target|deals`. "
+    "`report <period>` · "
+    "`export <period> sales|payables|budget|planned|targets|deals|journal|audit` · "
+    "`chart <period> revenue|budget|costs|target|deals` · `audit <id>|<period>` (who did what, "
+    "by participant id) · `who approves [<kind>]`. Months may be named: `chart October revenue`, "
+    "`report for November`, `export october sales`. "
     "Ids are GOALS-n, BUDGET-n, ENTRIES-n (the plan), CLOSE-n, PAY-n, LOCK-n (the close) and "
     "DEAL-n (sales)."
 )
@@ -216,6 +245,10 @@ def parse_command(body: str, names: tuple[str, ...] = DEFAULT_NAMES) -> Command 
             return Price(m.group(1), cents)
         if cls is Report:
             return Report(m.group(1))
+        if cls is Audit:
+            return Audit((m.group(1) or m.group(2)).upper())
+        if cls is Approvers:
+            return Approvers(m.group(1).lower() if m.group(1) else None)
         if cls is Read:
             return Read(m.group(1), (m.group(2) or "").strip())
         if cls is Load:
@@ -232,4 +265,111 @@ def parse_command(body: str, names: tuple[str, ...] = DEFAULT_NAMES) -> Command 
         if cls is Changes:
             return Changes(aid, m.group(2).strip())
         return cls(aid)
-    return None
+    return parse_loose(text)
+
+
+# -- loose phrasing for the reading commands ----------------------------------------------------
+# "chart October revenue", "export the november sales", "report for October 2026", "audit october".
+# Gates stay exact: nothing here produces an approve, deny or changes.
+
+MONTHS = {
+    m: i
+    for i, names in enumerate(
+        (
+            ("january", "jan"),
+            ("february", "feb"),
+            ("march", "mar"),
+            ("april", "apr"),
+            ("may",),
+            ("june", "jun"),
+            ("july", "jul"),
+            ("august", "aug"),
+            ("september", "sep", "sept"),
+            ("october", "oct"),
+            ("november", "nov"),
+            ("december", "dec"),
+        ),
+        start=1,
+    )
+    for m in names
+}
+FILLER = frozenset(
+    (
+        "show",
+        "me",
+        "the",
+        "a",
+        "an",
+        "for",
+        "of",
+        "on",
+        "in",
+        "please",
+        "give",
+        "get",
+        "this",
+        "that",
+        "month",
+        "months",
+        "report's",
+        "as",
+    )
+)
+LOOSE_VERBS = ("report", "chart", "export", "audit")
+CHART_KINDS = ("revenue", "budget", "costs", "target", "deals")
+EXPORT_TABLES = ("sales", "payables", "budget", "planned", "targets", "deals", "journal", "audit")
+_PERIOD = re.compile(r"^\d{4}-\d{2}$")
+_YEAR = re.compile(r"^(?:20)\d{2}$")
+
+
+def _today() -> datetime:  # patched in tests
+    return datetime.now(UTC)
+
+
+def month_period(name: str, year: str | None = None) -> str | None:
+    """`october` → 2026-10 (this year, or last year when the month is still ahead)."""
+    month = MONTHS.get(name.lower())
+    if month is None:
+        return None
+    if year:
+        return f"{int(year):04d}-{month:02d}"
+    today = _today()
+    y = today.year if month <= today.month else today.year - 1
+    return f"{y:04d}-{month:02d}"
+
+
+def parse_loose(text: str) -> Command | None:
+    words = [w.strip(",.:;!?") for w in text.lower().split()]
+    words = [w for w in words if w and w not in FILLER]
+    verb = next((w for w in words if w in LOOSE_VERBS), None)
+    if verb is None:
+        return None
+    period: str | None = None
+    rest: list[str] = []
+    i = 0
+    while i < len(words):
+        w = words[i]
+        if w == verb and period is None and verb not in rest:
+            rest.append(verb)
+        elif _PERIOD.match(w):
+            period = w
+        elif w in MONTHS:
+            year = words[i + 1] if i + 1 < len(words) and _YEAR.match(words[i + 1]) else None
+            period = month_period(w, year)
+            if year:
+                i += 1
+        elif not _YEAR.match(w):
+            rest.append(w)
+        i += 1
+    if period is None:
+        return None
+    subjects = [w for w in rest if w != verb]
+    if verb == "report":
+        return Report(period) if not subjects else None
+    if verb == "audit":
+        return Audit(period) if not subjects else None
+    kinds = CHART_KINDS if verb == "chart" else EXPORT_TABLES
+    subject = next((w for w in subjects if w in kinds), None)
+    if subject is None or len(subjects) != 1:
+        return None
+    return Chart(period, subject) if verb == "chart" else Export(period, subject)

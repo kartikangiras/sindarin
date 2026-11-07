@@ -26,6 +26,11 @@ exec_app = typer.Typer(
 )
 agent_app = typer.Typer(help="Sindarin agents: analyst, planner, bookkeeper.", no_args_is_help=True)
 app.add_typer(ledger_app, name="ledger")
+people_app = typer.Typer(
+    help="The people who approve: add a colleague to the rooms and a group, list, remove.",
+    no_args_is_help=True,
+)
+app.add_typer(people_app, name="people")
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -567,3 +572,142 @@ def agent_dry_run(
     for o in module.route(out, ev, ctx, thread):
         where = ctx.room_name(o.room_id) if o.room_id else "(no room)"
         print(f"→ {where}" + (f" (thread {o.thread_id})" if o.thread_id else "") + f":\n{o.text}\n")
+
+
+# sindarin people list | add | remove (design v5 §6): approvers without editing YAML by hand
+
+
+def _policy_files(repo_root: Path | None) -> tuple[Path, Path]:
+    root = _root(repo_root)
+    return root / "agents" / "policy" / "policy.yaml", root / "agents" / "policy" / "users.yaml"
+
+
+@people_app.command("list")
+def people_list(repo_root: Annotated[Path | None, typer.Option()] = None) -> None:
+    """Everyone the policy knows, with the groups each one may approve for."""
+    from sindarin.people import members
+
+    policy_path, users_path = _policy_files(repo_root)
+    rows = members(policy_path, users_path)
+    if not rows:
+        print("nobody yet; run `sindarin bootstrap` or `sindarin people add`")
+        return
+    width = max(len(m.username) for m in rows)
+    for m in rows:
+        groups = ", ".join(m.groups) or "no group"
+        print(f"{m.username:<{width}}  {m.display:<14}  {groups}")
+
+
+@people_app.command("add")
+def people_add(
+    username: Annotated[str, typer.Argument(help="the Mattermost username, e.g. alice")],
+    groups: Annotated[
+        str, typer.Option(help="comma-separated: cfo, controllers, board (empty = rooms only)")
+    ] = "",
+    display: Annotated[str, typer.Option(help="how the rooms show the name")] = "",
+    password: Annotated[
+        str, typer.Option(help="password if the account has to be created")
+    ] = "Sindarin-demo-1",
+    stack_env: Annotated[Path | None, typer.Option(help="The Docker stack's .env")] = None,
+    repo_root: Annotated[Path | None, typer.Option()] = None,
+) -> None:
+    """Put a colleague into every Sindarin room and into the approver groups named. The account
+    is found on Mattermost, or created with the given password; its participant id is written
+    into the policy, which the executors reload on their own. Never prints a password."""
+    from sindarin.bootstrap import ROOMS, MattermostTarget, _email, ensure_bridge
+    from sindarin.executor.config import parse_env_text
+    from sindarin.people import (
+        PeopleError,
+        add_to_rooms,
+        check_groups,
+        participant_id,
+        write_member,
+    )
+    from sindarin.policy import load_policy
+    from sindarin.switch.gateway import GatewayClient, GatewayError
+    from sindarin.switch.mattermost import MattermostClient, MattermostError
+
+    root = _root(repo_root)
+    policy_path, users_path = _policy_files(repo_root)
+    stack_env = stack_env or Path.home() / ".sindarin" / "switch-stack" / ".env"
+    if not stack_env.exists():
+        _fail(f"stack env not found: {stack_env} (run scripts/switch_stack.sh up)")
+    try:
+        wanted = check_groups([g.strip() for g in groups.split(",") if g.strip()])
+    except PeopleError as exc:
+        _fail(str(exc))
+        return
+    stack = parse_env_text(stack_env.read_text())
+    api = f"http://localhost:{stack.get('API_HOST_PORT') or '8000'}"
+    target = MattermostTarget.resolve(root, stack)
+    shown = display or username.capitalize()
+    try:
+        admin = GatewayClient.login(
+            api, stack["GATEWAY_ADMIN_EMAIL"], stack["GATEWAY_ADMIN_PASSWORD"]
+        )
+        bridge_id, _ = ensure_bridge(admin, target)
+        mm = MattermostClient.login(target.url, target.admin_user, target.admin_password)
+        team_id = mm.team_by_name(target.team_name)["id"]
+        user, created = mm.ensure_user(username, _email(username), password, shown)
+        print(f"mattermost user {username}: {'created' if created else 'exists'}")
+        policy = load_policy(policy_path)
+        listing = admin.list_rooms()
+        extra = [
+            str(r["id"])
+            for r in listing
+            if str(r.get("name", "")).startswith(("plan-", "close-")) and r.get("id")
+        ]
+        room_ids = [rid for rid in policy.rooms.values() if rid] + extra
+        channels = list(ROOMS) + [
+            str(r["name"])
+            for r in listing
+            if str(r.get("name", "")).startswith(("plan-", "close-"))
+        ]
+        joined = add_to_rooms(
+            gateway=admin,
+            mattermost=mm,
+            team_id=team_id,
+            username=username,
+            room_ids=room_ids,
+            channel_names=channels,
+        )
+        print(f"rooms: {joined['rooms']} Switch rooms, {joined['channels']} channels")
+        pid = participant_id(bridge_id, username)
+        write_member(policy_path, users_path, pid, shown, wanted)
+        print(f"policy: {username} ({shown}) in {', '.join(wanted) or 'no group'} · id {pid}")
+        # the Switch executor's own directory, so the entry is there for its next start too
+        # (a running executor seats a Mattermost member from the id itself)
+        from sindarin.executor.config import load_config, save_config
+
+        switch_yaml = root / "executor" / "switch.yaml"
+        if switch_yaml.exists():
+            cfg = load_config(switch_yaml)
+            if cfg.directory.get(pid) != username:
+                cfg.directory[pid] = username
+                save_config(switch_yaml, cfg)
+                print("executor/switch.yaml: directory updated")
+        admin.close()
+        mm.close()
+    except (GatewayError, MattermostError, PeopleError, KeyError) as exc:
+        _fail(f"{exc.__class__.__name__}: {exc}")
+
+
+@people_app.command("remove")
+def people_remove(
+    username: Annotated[str, typer.Argument(help="the Mattermost username")],
+    repo_root: Annotated[Path | None, typer.Option()] = None,
+) -> None:
+    """Take a person out of every approver group. The account and its room memberships stay."""
+    from sindarin.people import PeopleError, members, write_member
+
+    policy_path, users_path = _policy_files(repo_root)
+    hit = next((m for m in members(policy_path, users_path) if m.username == username), None)
+    if hit is None:
+        _fail(f"{username} is not in users.yaml")
+        return
+    try:
+        write_member(policy_path, users_path, hit.participant_id, hit.display, [])
+    except PeopleError as exc:
+        _fail(str(exc))
+        return
+    print(f"policy: {username} is in no group now")

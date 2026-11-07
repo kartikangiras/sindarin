@@ -9,6 +9,7 @@ bootstrap writes into executor/switch.yaml; the translation is display plumbing,
 from __future__ import annotations
 
 import logging
+import re
 import time
 from collections.abc import Mapping
 from typing import Any, Protocol
@@ -49,6 +50,7 @@ class RoomsGateway(Protocol):
 # syncing them to Mattermost for a moment; a post in that window reaches only the members already
 # synced (2026-11-06: the reviewer never saw the brief). Adapters run off the event loop, so a
 # short wait here is safe. Tests set it to 0.
+MATTERMOST_ID = re.compile(r"^@switch-mattermost-([0-9a-f-]{36})-(.+):localhost$")
 SETTLE_SECONDS = 3.0
 
 
@@ -79,10 +81,23 @@ class SwitchRoomsAdapter:
         return Facts(ok=True, data={})
 
     def _translate(self, ids: list[str]) -> list[str]:
-        missing = [i for i in ids if i not in self.directory]
+        """Participant ids to seats: agents through the directory (their Gateway ids), people
+        through the directory or, for a Mattermost member, from the id itself, which carries the
+        username by construction. So a colleague added after the bootstrap can sit in a room."""
+        seats: list[str] = []
+        missing: list[str] = []
+        for i in ids:
+            if i in self.directory:
+                seats.append(self.directory[i])
+                continue
+            m = MATTERMOST_ID.match(i)
+            if m:
+                seats.append(m.group(2))
+                continue
+            missing.append(i)
         if missing:
             raise AdapterError(f"{len(missing)} participant id(s) missing from the directory")
-        return list(dict.fromkeys(self.directory[i] for i in ids))  # one person, one seat
+        return list(dict.fromkeys(seats))  # one person, one seat
 
     def _find(self, name: str) -> dict[str, Any] | None:
         """The room of that name on this adapter's bridge. With two Mattermost servers connected

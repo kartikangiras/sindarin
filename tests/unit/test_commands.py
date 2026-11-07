@@ -85,7 +85,6 @@ def test_grammar(body, expected):
         "deny BUDGET-1 " + "x" * 301,
         "sale S-2026-1055",
         "sale S-2026-1055 lots Contoso",
-        "report October",
         "chart 2026-10",
         "export 2026-10 all the things",
     ],

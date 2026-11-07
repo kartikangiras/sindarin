@@ -7,6 +7,7 @@ harness drives it with the fake adapters and a list-capturing poster. `service.p
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -52,6 +53,10 @@ class FilePoster(Protocol):
 
     def post_file(
         self, room_id: str, text: str, filename: str, data: bytes, mime: str, thread_id: str | None
+    ) -> bool: ...
+
+    def post_files(
+        self, room_id: str, text: str, files: list[tuple[str, bytes, str]], thread_id: str | None
     ) -> bool: ...
 
 
@@ -236,7 +241,88 @@ class Effector:
                     applied.extend(self._load_books(e))
                 case core.RunReport():
                     applied.extend(self._run_report(e))
+                case core.RunAudit():
+                    applied.extend(self._run_audit(e))
         return applied
+
+    # -- the audit trail ----------------------------------------------------------------------
+
+    def _audit_rows(self, target: str, with_peer: bool) -> list[dict[str, Any]]:
+        """Audit entries for one artifact or one month, from this executor's store and, when
+        asked, the peer's; each row carries the executor that wrote it."""
+        stores: list[tuple[str, Store, bool]] = [(self.config.executor or "", self.store, False)]
+        peer: Store | None = None
+        if with_peer and self.config.peer_state_db and self.config.peer_state_db.exists():
+            try:
+                peer = Store(self.config.peer_state_db, readonly=True)
+                stores.append(("peer", peer, True))
+            except Exception as exc:
+                log.warning("peer state unreadable: %s", exc.__class__.__name__)
+        rows: list[dict[str, Any]] = []
+        is_period = bool(re.fullmatch(r"\d{4}-\d{2}", target))
+        try:
+            for owner, store, _ in stores:
+                entries = store.audit_for(target) if not is_period else store.audit_all()
+                periods: dict[str, str] = {}
+                for entry in entries:
+                    aid = entry.artifact_id or ""
+                    if is_period:
+                        if aid and aid not in periods:
+                            a = store.get(aid)
+                            periods[aid] = a.period if a is not None else ""
+                        in_month = (
+                            periods.get(aid) == target
+                            or str(entry.details.get("period", "")) == target
+                            or (not aid and entry.ts.strftime("%Y-%m") == target)
+                        )
+                        if not in_month:
+                            continue
+                    rows.append(
+                        {
+                            "ts": entry.ts.strftime("%Y-%m-%d %H:%M:%S"),
+                            "seq": int(entry.id or 0),
+                            "executor": owner,
+                            "event": entry.event,
+                            "artifact": aid,
+                            "actor": entry.actor_name or "",
+                            "actor_id": entry.actor_id or "",
+                            "details": _compact(entry.details),
+                        }
+                    )
+        finally:
+            if peer is not None:
+                peer.close()
+        rows.sort(key=lambda r: (r["ts"], r["seq"]))  # same second: the order they were written
+        return rows
+
+    def _run_audit(self, e: core.RunAudit) -> list[core.Effect]:
+        rows = self._audit_rows(e.target, e.with_peer)
+        if not rows:
+            text = f"**audit {e.target}** · nothing recorded."
+        else:
+            shown = rows[-40:]
+            head = f"**audit {e.target}** · {len(rows)} event{'s' if len(rows) != 1 else ''}"
+            if len(rows) > len(shown):
+                head += f" · the last {len(shown)}; `export {e.target} audit` has them all"
+            lines = [head, "```"]
+            for r in shown:
+                who = f" · {r['actor']}" if r["actor"] else ""
+                aid = f" · {r['artifact']}" if r["artifact"] else ""
+                det = f" · {r['details']}" if r["details"] else ""
+                lines.append(f"{r['ts'][11:16]} {r['ts'][:10]} · {r['event']}{aid}{who}{det}")
+            lines.append("```")
+            text = "\n".join(lines)
+        return self.apply(
+            [
+                core.Audit(
+                    "audit_posted",
+                    actor_id=e.actor_id,
+                    room_id=e.room_id,
+                    details={"target": e.target, "rows": len(rows)},
+                ),
+                core.Post(e.room_id, text, e.thread_id),
+            ]
+        )
 
     def _run_report(self, e: core.RunReport) -> list[core.Effect]:
         """Render from the read-only ledger; attach the file through Switch when a poster is
@@ -248,6 +334,8 @@ class Effector:
         try:
             if e.what == "report":
                 out = reports.report(self.ledger, e.period)
+            elif e.what == "export" and e.subject == "audit":
+                out = self._audit_export(e.period)
             elif e.what == "export":
                 out = reports.export(self.ledger, e.period, e.subject)
             elif self.files is not None:
@@ -264,6 +352,22 @@ class Effector:
                 [core.Post(e.room_id, f"**{e.what} {e.period}** — could not render.", e.thread_id)]
             )
         posted_file = False
+        charts: list[tuple[str, bytes, str]] = []
+        if e.what == "report" and self.files is not None:
+            # the month's charts ride along with the report, the ones the month has data for
+            for kind in ("revenue", "budget", "target", "costs", "deals"):
+                try:
+                    png = reports.chart_png(self.ledger, e.period, kind)
+                    charts.append((png.filename, png.data, png.mime))
+                except reports.ReportError:
+                    continue
+                except Exception as exc:
+                    log.warning("chart %s failed: %s", kind, exc.__class__.__name__)
+            if charts and hasattr(self.files, "post_files"):
+                try:
+                    posted_file = self.files.post_files(e.room_id, out.text, charts, e.thread_id)
+                except Exception as exc:
+                    log.warning("report charts not attached: %s", str(exc)[:120])
         if out.data and self.files is not None:
             try:
                 posted_file = self.files.post_file(
@@ -277,7 +381,7 @@ class Effector:
                 actor_id=e.actor_id,
                 actor_name=e.actor_name,
                 room_id=e.room_id,
-                details={**out.facts, "rows": out.rows, "file": posted_file},
+                details={**out.facts, "rows": out.rows, "file": posted_file, "charts": len(charts)},
             )
         ]
         if not posted_file:
@@ -289,6 +393,29 @@ class Effector:
                 text = reports.chart_text(self.ledger, e.period, e.subject).text
             effects.append(core.Post(e.room_id, text, e.thread_id))
         return self.apply(effects)
+
+    def _audit_export(self, period: str):
+        """The month's audit trail across both executors as a CSV file."""
+        import csv
+        import io
+
+        from sindarin import reports
+
+        rows = self._audit_rows(period, True)
+        if not rows:
+            raise reports.ReportError(f"nothing recorded for {period}")
+        buf = io.StringIO()
+        writer = csv.DictWriter(buf, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(rows)
+        return reports.Output(
+            text=f"**audit {period}** · {len(rows)} event{'s' if len(rows) != 1 else ''}",
+            filename=f"audit-{period}.csv",
+            data=buf.getvalue().encode("utf-8"),
+            mime="text/csv",
+            rows=len(rows),
+            facts={"period": period, "what": "audit"},
+        )
 
     def _inspect_file(self, e: core.InspectFile) -> list[core.Effect]:
         """Fetch the linked file, describe it and check it against the books' layout."""
@@ -532,3 +659,20 @@ class Effector:
                 log.exception("adapter verify crashed")
                 v = VerifyResult(present=None, error=f"adapter error: {exc.__class__.__name__}")
         return self.apply(core.after_verify(self.context(), a, v))
+
+
+def _compact(details: Mapping[str, Any], limit: int = 110) -> str:
+    """Audit details as `key=value` pairs a person can read; digests and ids stay out."""
+    skip = {"digest", "snapshot", "fence", "room_id", "url"}
+    parts = []
+    for k, v in details.items():
+        if k in skip or k.endswith(("_sha", "_id")) or v in (None, "", [], {}):
+            continue
+        if isinstance(v, int) and k.endswith("_cents"):
+            v = f"{v / 100:,.2f}"
+            k = k[:-6]
+        elif isinstance(v, dict | list):
+            v = str(len(v)) + (" items" if isinstance(v, list) else " fields")
+        parts.append(f"{k}={v}")
+    text = " ".join(parts)
+    return text if len(text) <= limit else text[: limit - 1] + "…"
