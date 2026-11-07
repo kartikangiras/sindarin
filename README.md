@@ -5,15 +5,18 @@
   <img src="docs/brand/logo.svg" alt="Sindarin" width="300">
 </picture>
 
-**An agent can propose, only a verified human can authorize, and the code that executes trusts
-neither the agent nor the chat text.** Landing page: [sindarin-nu.vercel.app](https://sindarin-nu.vercel.app).
+**A company's finance month, run from chat on Switch. Agents draft, the right people approve,
+deterministic executors move the books.** Landing page:
+[sindarin-nu.vercel.app](https://sindarin-nu.vercel.app).
 
-Most agent demos keep a human in the loop the same way: the agent asks "shall I do it?", a
-person types "yes", and the same agent does it. Nobody checks who said yes, what was approved,
-or whether it was said twice. Sindarin is that check, built as the finance workflows a company
-runs every month inside Switch's chat app: the plan, the month-end close and the sales deals.
-Seven gates run on one engine, with the reports, exports and charts the team expects, and the
-team's own spreadsheet is the record.
+## The month, run from chat
+
+A finance team plans the month, closes it and wins deals. In Sindarin that work happens in the
+team's chat, with five agents and two executors in the same rooms as the CFO, the controllers,
+the board and sales. The analyst reports the month, the planner budgets it, the bookkeeper posts
+it, treasury pays it, sales brings the deals in. Every step is a gate: a named group says yes in
+a named room, and the executor checks the books still match the proposal before it moves them.
+The team's own spreadsheet is the record.
 
 ```
 plan   ask → analyst reports the month, planner proposes the goals ──[CFO]──► plan room opens
@@ -28,13 +31,10 @@ sales  ask → sales prices the deal from the price book ──[CFO; controller 
              the sale lands in the open month, finance is told
 ```
 
-Agents draft, people commit, executors act. Five LLM agents (`analyst`, `planner`,
-`bookkeeper`, `treasury`, `sales`) hold no credential that can change anything; every number they post
-comes from a tool that read the ledger. Two deterministic executors (`sindarin-switch`,
-`sindarin-ledger`) hold one credential each and accept exactly two inputs: a JSON fence from a
-named agent, and a seven-word command from a named human. Every step has the same shape, and
-each executor hands the work to the next agent with one stage line. A chain runs the same way
-every month, and a new chain is rules, an agent and tests on the same engine.
+The agents hold no credential that can change anything; every number they post comes from a
+tool that read the ledger. The two executors hold one credential each and accept exactly two
+inputs: a JSON fence from a named agent and a short command from a named person. Who said yes
+is a Switch participant id, never a display name.
 
 ## The whole thing on one map
 
@@ -48,205 +48,289 @@ Sky arrows are the plan chain, amber the close, green the deals, grey the record
 say who approves each gate and the checks that run on every approve. Thin lines tie everything
 to Switch.
 
-## Reproduce it in ten minutes
+## The agents
 
-Docker Desktop and [`uv`](https://docs.astral.sh/uv/) are the only prerequisites.
+Five LLM agents run on Claude with one or two strict tools each, behind validators that refuse
+anything the ledger does not back. Without a model key they run a deterministic stand-in through
+the same tools. The two executors run no model at all.
 
-```
-git clone https://github.com/kartikangiras/sindarin && cd sindarin
-cp .env.example .env            # optional: add ANTHROPIC_API_KEY=... for the agents to run on Claude
-scripts/demo.sh                 # Switch + Mattermost in Docker, the ledger, the bootstrap, 7 processes
-```
+| Agent | Where | What it does | Tools | Cannot |
+|---|---|---|---|---|
+| `@analyst` | `#acme-finance` | Reports the month from the ledger against its targets, reads any file a person links, tells the business when a month is planned or closed. Proposes nothing. | `month_report`, `read_file` | propose, approve, write |
+| `@planner` | `#acme-finance`, `#planning` | Proposes the period's goals from the basis month's actuals, then the budget under the approved cap, one line per department. | `propose_goals`, `propose_budget` | record, spend |
+| `@bookkeeper` | plan and period rooms | Proposes the register entries once a budget is recorded, the month's close plan when asked, the lock once the payment run is paid. | `propose_entries`, `propose_close`, `propose_lock` | post, lock |
+| `@treasury` | `#payments` | Proposes the payment run of an approved plan from the open payables as the ledger holds them: vendor, invoice, amount, total. | `propose_payment_run` | pay |
+| `@sales` | `#sales` | Registers a deal at a price against the ledger's price book. The list price and the discount come from the tool; the asked price is the only figure it repeats. | `propose_deal` | discount, approve, book |
+| `@sindarin-switch` | `#acme-finance` and the rooms it opens | Executor, deterministic, holds the Gateway credential. Verifies approvals by participant id and opens the plan and period rooms with the brief as a Switch document. Keeps the board. Reads the ledger read-only for reports, exports, charts and linked files. | `approve` `deny` `changes` `board` `brief` `report` `export` `chart` `read` `audit` | write the books |
+| `@sindarin-ledger` | `#planning`, `#payments`, `#sales` and the opened rooms | Executor, deterministic, the only writer of the books. Verifies approvals by participant id; records budgets, posts entries, pays payables, locks periods, wins deals. Takes a person's late sale, a list price and the team's file into the books. | `approve` `deny` `changes` `sale` `price` `load` `audit` | touch Switch's Gateway |
 
-Then open http://localhost:8065, team `switch`, sign in as `user` with the password
-`Sindarin-demo-1`, and in `#acme-finance` type `@analyst @planner plan November`. The analyst
-reports October from the ledger, the planner proposes `GOALS-1`, and `@sindarin-switch approve
-GOALS-1` opens the plan room. The full script of all three workflows is under *Demo* below.
-`uv run pytest` runs 194 tests, eleven of them adversarial. Without an Anthropic key the agents
-run a deterministic stand-in through the same tools and validators, so every gate, refusal and
-report still happens. `scripts/demo.sh stop` stops the processes, and `scripts/reset_demo.sh
---rooms` puts the lab back to the start.
+The prompts are in `agents/<role>/AGENT.md`; the groups and limits in `agents/policy/policy.yaml`.
+
+## The workflows
+
+Every gate has the same shape: an agent proposes as a JSON fence, a named group approves in a
+named room, an executor acts and hands the work on with one stage line. A new chain is rules, an
+agent and tests on the same engine.
+
+### Plan the month
+
+Ask `@analyst @planner plan November` in `#acme-finance`. Rooms: `#acme-finance` →
+`#planning` → `#plan-2026-11`. Budget limit 10,000.00 USD: the CFO alone below it, the board above.
+
+| Gate | Who approves | Command | Result |
+|---|---|---|---|
+| `GOALS-1` | cfo | `@sindarin-switch approve GOALS-1` | opens the plan room with the brief |
+| `BUDGET-1` | board, cfo under the limit | `@sindarin-ledger approve BUDGET-1` | recorded under the cap |
+| `ENTRIES-1` | controllers | `@sindarin-ledger approve ENTRIES-1` | register entries posted, period planned |
+
+A sale typed in chat between the budget proposal and its approval gets the approval refused with
+both revenues, the snapshot replaced and the planner asked again.
+
+### Close the month
+
+Ask `@analyst @bookkeeper close October` in `#acme-finance`. Rooms: `#acme-finance` →
+`#payments` → `#close-2026-10`. Payment limit 10,000.00 USD: controllers below it, the CFO above.
+
+| Gate | Who approves | Command | Result |
+|---|---|---|---|
+| `CLOSE-1` | controllers | `@sindarin-switch approve CLOSE-1` | opens the period room |
+| `PAY-1` | cfo, controllers under the limit | `@sindarin-ledger approve PAY-1` | payables paid, verified by read-back |
+| `LOCK-1` | controllers | `@sindarin-ledger approve LOCK-1` | entries posted, debits equal credits, period locked |
+
+A payable amended under a pending run refuses the stale approval with both amounts. A run naming
+an invoice outside the approved plan is refused before anyone is asked. Plan first, then close: a
+locked month takes no late sale.
+
+### Win a deal
+
+Ask `@sales deal Contoso Ltd on Team at 10,200.00` in `#sales`; `#acme-finance` is told once.
+Discount limit 1,000.00 USD: controllers below it, the CFO above.
+
+| Gate | Who approves | Command | Result |
+|---|---|---|---|
+| `DEAL-1` | cfo, controllers under the discount limit | `@sindarin-ledger approve DEAL-1` | deal won, the sale lands in the open month |
+| price | any person | `@sindarin-ledger price Team 12500.00` | moves the list price under a pending deal |
+| chart | anyone | `@sindarin-switch chart 2026-11 deals` | the month's deals as a PNG in the room |
+
+The list price comes from the ledger's price book, never from the agent. A fence that claims
+another list price is refused before anyone is asked; a locked month takes no deal.
 
 ## How Switch is used
 
 The Switch surface the project stands on, as one turning scene: Switch at the core, every
 primitive the project uses on the inner ring, what Sindarin does with each on the outer ring,
-and the chat apps the collaboration bridge carries behind it. The live version, with every node
-explained on hover, is on the [landing page](https://sindarin-nu.vercel.app/#switch).
+and the chat apps the collaboration bridge carries behind it. The live version is on the
+[landing page](https://sindarin-nu.vercel.app/#switch).
 
 ![Sindarin on Switch: participant identity, rooms, members, instructions, documents, links, groups, attachments, budgets, addressing, the event stream, the agent protocol, the Gateway, the Console and the bridge](docs/brand/switch-map.gif)
 
+The same server as the Switch Gateway draws it, on its Ecosystem page: Switch in the middle, the
+two Mattermost bridges above, the `sindarin` connector type below with its seven agents.
+
+![The Switch Gateway's Ecosystem page for this server: Switch, two Mattermost bridges, the sindarin connector type and its seven agents](docs/brand/ecosystem.gif)
+
 - **Identity.** Every event carries a Switch participant id. Approver groups, proposers and
   executors are lists of ids in `agents/policy/policy.yaml`; display names are never consulted.
-  An impostor named "Isaac" gets the same refusal as the sales person.
+  An impostor renamed "Isaac" gets the same refusal as the sales person.
 - **Rooms.** `#acme-finance`, `#planning`, `#payments`, `#sales` and the rooms a chain opens
   (`#plan-<period>`, `#close-<period>`) are Switch rooms bridged to Mattermost. The executor
   opens the room when the first gate passes, with the approvers, the chain's agents and
-  `sindarin-ledger` as members and the brief as its instructions. `brief` re-posts it to anyone
-  who asks.
+  `sindarin-ledger` as members and the brief as its instructions.
 - **Documents, groups, links.** The brief is also a Switch document attached to the room, the
-  room is linked from `#acme-finance` and joins the "Acme finance" room group, so the Switch
-  console shows the month as one thing.
-- **Attachments.** Charts and exports go into the room as files through Switch's attachment
-  route; where files cannot be carried the same chart is a text bar chart.
-- **Budgets.** The bootstrap caps every LLM agent at 200,000 output tokens a day with Switch's
-  own usage budgets, a limit beside the gates.
-- **Routing.** Each agent's Switch addressing policy is scoped to the rooms it belongs to, and
-  the executor that opens a room widens the policies of the agents it puts there. That is layer
-  0; the executors re-check every sender in code, so a refusal is always visible.
-- **Agents.** The seven agents are registered by the bootstrap through the Gateway API as
-  external agents and connect over Switch's agent protocol with their own keys; the Switch
-  Console lists them next to the rooms, the room group, the documents and the budgets. The five
-  LLM roles can also be created as Console-run Claude Code agents, from
-  `templates/sindarin.template.yaml` (Console → Templates; the Gateway's validator accepts it).
-  The two executors stay external by design: they are deterministic code holding a credential,
-  and a prompt-driven agent cannot be the thing that verifies.
-- **The bridge.** Everything on screen is Mattermost, the one bundled with Switch or a server of
-  your own connected through the Gateway. Remove Switch and there is no identity to verify, no
+  room is linked from `#acme-finance` and joins the "Acme finance" room group. Charts and exports
+  go into the room as files through Switch's attachment route, and the bootstrap caps every LLM
+  agent at 200,000 output tokens a day with Switch's usage budgets.
+- **Routing.** Each agent's addressing policy is scoped to its rooms, and the executor that
+  opens a room widens the policies of the agents it puts there. The executors re-check every
+  sender in code, so a refusal is always visible.
+- **Agents on the protocol.** All seven are registered through the Gateway API and connect over
+  the agent protocol with their own keys. Connect the Switch Console to the server and each room
+  lists them; the Console's own *Your Agents* page shows only agents it runs, and the Gateway
+  lists all seven. The five LLM roles can also be created as Console-run Claude Code agents from
+  `templates/sindarin.template.yaml`; the executors stay external by design, because a prompt
+  can be talked out of a rule and deterministic code cannot.
+- **The bridge.** Everything on screen is Mattermost, the one bundled with Switch or your own
+  server connected through the Gateway. Remove Switch and there is no identity to verify, no
   transport, no rooms and no record.
 
-## Run it
+## Run it yourself
 
-`scripts/demo.sh` does everything the quick start above describes. You drive the demo from the
-Mattermost user Switch's stack seeds next to the admin (`MATTERMOST_USER` in
-`~/.sindarin/switch-stack/.env`), which the bootstrap puts in every room and every approver
-group. Its password is `MATTERMOST_USER_PASSWORD` from `.env` when you set one, otherwise the
-bootstrap sets the demo password `Sindarin-demo-1`. You are the only person in the demo; the
-four-person team described under *member-specific workflows* is optional
-(`PEOPLE=cast scripts/demo.sh`). `uv run sindarin doctor` says what is missing, if anything
-is. The pieces, if you prefer them one by one: `PROFILES="gateway collab"
-scripts/switch_stack.sh up` · `uv run sindarin ledger import` · `uv run sindarin bootstrap` ·
-`scripts/dev_stack.sh start [--fake]`. `scripts/reset_demo.sh --rooms` wipes the executors'
-state, reloads the ledger and removes the rooms a run opened.
+Docker Desktop and [`uv`](https://docs.astral.sh/uv/) are the only prerequisites. Without an
+Anthropic key the agents run the deterministic stand-in through the same tools and validators,
+so every gate, refusal and report still happens.
 
-**One env file.** `cp .env.example .env` and fill what you have; the bootstrap writes the seven
-Switch identities below your lines. Each process is handed only its own block: the model key
-reaches the agents, the Gateway credential reaches `sindarin-switch` alone, and only
-`sindarin-ledger` opens the ledger for writing (and holds the Google key for the sheet).
-**Your colleagues.** `uv run sindarin people add alice --groups cfo` finds or creates the
-Mattermost account, puts it in every room and writes its participant id into the policy; the
-executors reload the file on their own. `people list` shows who approves what, `people remove`
-takes someone out of the groups. The limits sit next to the groups in `agents/policy/policy.yaml`
-and are yours to change. **Real model.** `ANTHROPIC_API_KEY` in `.env`; the agents then run
-Claude Opus 5.5 with one or two strict tools each, through the same validators the stand-in uses. **Your own Mattermost.**
-Set `MATTERMOST_URL`, the admin user and password, your user account and the team in `.env`
-(enable Bot Account Creation on that server); the bootstrap connects it to Switch as a new
-bridge and creates the rooms and people there.
+### The ten-minute demo
 
-## Real data: your sheet or your workbook
+The sample month, you as every approver.
 
-The ledger is a SQLite file, `executor/books.db`, and it is loaded from wherever the team keeps
-its numbers. The tabs are the same everywhere: `accounts`, `sales`, `payables`, `targets` and,
-for the deals, `price_book`, with money as cents (`amount_cents`) or as decimals (`amount`).
+```bash
+git clone https://github.com/kartikangiras/sindarin && cd sindarin
+cp .env.example .env            # optional: ANTHROPIC_API_KEY=sk-ant-… for the agents to run on Claude
+scripts/demo.sh                 # Switch + Mattermost in Docker, the ledger, the bootstrap, seven processes
+```
 
-- **Google Sheets.** Share the sheet by link and `uv run sindarin ledger import --sheet <link>`:
-  each tab is read through its CSV export, no credential needed. With a Google service account
-  key in `.env` as `SINDARIN_LEDGER_GOOGLE_SA`, `sindarin-ledger` writes back what it records,
-  the budget, the planned lines, the paid payables and the won deals, into tabs of the same sheet.
-- **Excel.** `uv run sindarin ledger import --xlsx acme.xlsx` reads the same tabs from a
-  workbook; `uv run sindarin ledger export-xlsx acme.xlsx` writes the whole ledger back out,
-  one sheet per table.
-- **The sample.** `data/acme/2026-10/` holds October: thirteen sales rows with one duplicate,
-  three payables, the targets October was given, a price book of three products.
+Open http://localhost:8065, team `switch`, and sign in as `user` with the password
+`Sindarin-demo-1`. The bootstrap has put that account in every room and every approver group.
+Then type, in order:
 
-You can skip the terminal for files. Paste a link to `@sindarin-switch read` to see what the
-file holds, then `@sindarin-ledger load` to take it into the books (see *Reports*).
+| Room | Type | What happens |
+|---|---|---|
+| `#acme-finance` | `@analyst @planner plan November` | the analyst reports October, the planner proposes `GOALS-1` |
+| | `@sindarin-switch approve GOALS-1` | `#plan-2026-11` opens; in `#planning` the planner proposes `BUDGET-1` |
+| `#planning` | `@sindarin-ledger sale S-2026-1055 3980.00 Contoso Ltd` | the books move |
+| | `@sindarin-ledger approve BUDGET-1` | refused: the ledger changed since the proposal; re-proposed |
+| | `@sindarin-ledger approve BUDGET-1` | recorded; in the plan room the bookkeeper proposes `ENTRIES-1` |
+| `#plan-2026-11` | `@sindarin-ledger approve ENTRIES-1` | entries posted, period planned, the business told |
+| `#acme-finance` | `@analyst @bookkeeper close October` | the bookkeeper proposes `CLOSE-1` |
+| | `@sindarin-switch approve CLOSE-1` | `#close-2026-10` opens; in `#payments` treasury proposes `PAY-1` |
+| `#payments` | `@sindarin-ledger approve PAY-1` | three payables paid, verified; the bookkeeper proposes `LOCK-1` |
+| `#close-2026-10` | `@sindarin-ledger approve LOCK-1` | entries posted, period locked |
+| `#sales` | `@sales deal Contoso Ltd on Team at 10,200.00` | priced from the price book; `DEAL-1` needs the CFO |
+| | `@sindarin-ledger price Team 12500.00` | the books move |
+| | `@sindarin-ledger approve DEAL-1` | refused with both prices; re-proposed; approve again: won |
+| anywhere | `@sindarin-switch report 2026-11` | the month with its charts attached |
 
-The "books moved" moment works on any of them: a sale typed in chat
-(`@sindarin-ledger sale S-2026-1055 3980.00 Contoso Ltd`) or a row added to the sheet between a
-proposal and its approval gets the approval refused with both amounts.
+```bash
+uv run python scripts/walkthrough.py   # the same script, typed for you, with the timing of a demo
+PEOPLE=cast scripts/demo.sh            # adds a four-person team: CFO, controller, board member, sales
+uv run python scripts/rehearse.py --chain plan   # plays that team through a chain, refusals included
+scripts/reset_demo.sh --rooms          # back to the start: executor state, the ledger, the opened rooms
+scripts/demo.sh stop                   # stops the seven processes; Switch keeps running
+uv run pytest                          # 194 tests, eleven of them adversarial
+```
 
-## Reports, exports and charts
+### Your team, your books
 
-From any room, deterministic, read from the ledger by `sindarin-switch`:
+The same workflows on your Mattermost, with your sheet and your approvers.
 
-- `@sindarin-switch report 2026-10`: the month against its targets, the recorded budget, the
-  planned amounts, budget against actual once the month has both, with the month's charts
-  attached as PNGs.
-- `@sindarin-switch export 2026-10 sales` (or payables, budget, planned, targets, deals,
-  journal): the rows as a CSV file in the room.
-- `@sindarin-switch chart 2026-10 revenue` (or budget, costs, target, deals): a bar chart as a
-  PNG in the room, drawn from the same rows.
-- `@sindarin-switch read <link>`: any file a person links, a Google Sheet, a file on Drive, a
-  direct link to an .xlsx or .csv. The bot reads it tab by tab and says what it holds (rows,
-  columns, totals, date ranges, duplicate invoices, missing columns) and whether the books can
-  take it. `read <link> sales` lists that tab's entries as a table and attaches the whole tab
-  as a CSV. A sheet that is not shared by link, a deleted file or a web page gets a one-line
-  reason and the fix. `@analyst` reads the same link when asked in words.
-- `@sindarin-ledger load <link>`: the team's file into the books, from chat, by someone in an
-  approver group. Open rows are replaced; paid payables and locked months are kept and named.
-- `audit GOALS-1` or `audit 2026-10`: the trail, event by event, with the participant id behind
-  each one: who proposed, who was refused and why, who approved, what was verified. The
-  executor that holds the artifact answers; a month asked in `#acme-finance` covers both
-  executors. `export 2026-10 audit` gives the same as a CSV.
-- `who approves budget` (or any kind, or nothing for all of them): the group, the limit and the
-  names, read from the policy.
+**1. Install and choose the model.**
 
-Months may be named instead of typed: `chart October revenue`, `report for November`,
-`export the october sales`, `audit october`. Only the reading commands take loose phrasing;
-`approve`, `deny` and `changes` are exact, by design.
+```bash
+git clone https://github.com/kartikangiras/sindarin && cd sindarin
+cp .env.example .env
+# in .env: ANTHROPIC_API_KEY=sk-ant-…   (empty = the deterministic stand-in)
+```
 
-## Demo (three chains, one person on screen)
+**2. Your Mattermost, or the bundled one.** Leave `MATTERMOST_URL` empty and the Switch stack
+brings its own server. For your company's server, fill these in `.env`; the bootstrap bridges it
+to Switch and creates the bot accounts and the rooms there. Bot Account Creation must be enabled
+on that server.
 
-You drive every step from one account, the single approver at all three gates. The agents
-draft from the ledger, and at each gate an executor checks that the participant id behind your
-message is in the group the rule names; nobody else is in the rooms.
+```bash
+MATTERMOST_URL=https://chat.yourcompany.com
+MATTERMOST_ADMIN_USER=…
+MATTERMOST_ADMIN_PASSWORD=…
+MATTERMOST_USER=you                    # the account you drive from, put in every room and group
+MATTERMOST_USER_PASSWORD=…
+MATTERMOST_TEAM_NAME=finance
+```
 
-**The plan**, in `#acme-finance`: `@analyst @planner plan November`. The analyst posts October
-against its targets; the planner proposes `GOALS-1` for November, computed from October.
-`@sindarin-switch approve GOALS-1` opens `#plan-2026-11`. In `#planning` the planner proposes
-`BUDGET-1`, one line per department, **16,000.00 USD** under the cap. Type the late sale, then
-approve: *"the ledger changed since the proposal (2026-10 revenue 89,905.00 USD → 93,885.00
-USD)"*, refused, re-proposed; approve again: recorded. In `#plan-2026-11` the bookkeeper proposes
-`ENTRIES-1`; approve: four lines posted, period planned. The analyst tells the business in the
-original thread; `@sindarin-switch chart 2026-11 budget` shows the result.
+**3. Start everything.** One script does the stack, the ledger, the bootstrap and the seven
+processes. The bootstrap writes the seven Switch identities below your lines in `.env`; each
+process is handed only its own block.
 
-**The close**, in `#acme-finance`: `@analyst @bookkeeper close October`. The bookkeeper proposes
-`CLOSE-1`: the adjusting entries, the payables to pay, the total. `@sindarin-switch approve
-CLOSE-1` opens `#close-2026-10`. In `#payments` the treasury agent proposes `PAY-1`, three
-payables, **14,250.00 USD**; approve: paid, verified. In `#close-2026-10` the bookkeeper
-proposes `LOCK-1`; approve: entries posted, debits equal credits, period locked.
-`@sindarin-switch board` reads both chains done. Plan first, then close: a locked month takes
-no late sale.
+```bash
+scripts/demo.sh
+# or, one piece at a time:
+PROFILES="gateway collab" scripts/switch_stack.sh up
+uv run sindarin ledger import
+uv run sindarin bootstrap --people me
+scripts/dev_stack.sh start
+uv run sindarin doctor                 # says what is missing, if anything is
+```
 
-**A deal**, in `#sales`: `@sales deal Contoso Ltd on Team at 10,200.00`. The sales agent prices
-it from the price book: Team lists at **12,000.00 USD**, so this is a **1,800.00 USD** discount,
-above the limit, and `DEAL-1` needs the CFO. `@sindarin-ledger price Team 12500.00` moves the
-list price under the pending deal; approve: *"the ledger changed since the proposal (list price
-12,000.00 USD → 12,500.00 USD)"*, refused, re-proposed at the new discount; approve again: won,
-the sale is in November's books, and `#acme-finance` is told once. A deal at 5% off is the
-controller's to approve. `@sindarin-switch chart 2026-11 deals` draws the month's deals.
+**4. Load your numbers.** A Google Sheet shared by link, or an Excel workbook, with the tabs
+`accounts`, `sales`, `payables`, `targets` and, for deals, `price_book`; money as cents
+(`amount_cents`) or decimals (`amount`). Do it from chat or from the terminal.
 
-**Member-specific workflows.** Groups are lists of participant ids, so the same chains run for
-a team with one approver per gate and a limit per rule. `uv run sindarin bootstrap --people
-cast` sets up four accounts: John (CFO), Leonardo (controller), Isaac (CEO, on the board) and
-Vincent (sales, no group). Each gate then answers to exactly its group: Vincent's
-`approve GOALS-1` is refused as *"Vincent is not in the cfo group"*; John's `approve BUDGET-1`
-is refused as *"16,000.00 USD needs the board group; cfo may approve up to 10,000.00 USD"*;
-Leonardo's `approve PAY-1` is refused above the payment limit and his `approve DEAL-1` above the
-discount limit; an impostor renamed "Isaac" is refused like Vincent. `--people both` keeps you
-in every group alongside them, and `scripts/rehearse.py --chain plan|close|sales` plays the
-team through any chain against the live stack.
+```bash
+# in chat
+@sindarin-switch read <your sheet link>        # what it holds, tab by tab, and what to fix
+@sindarin-ledger load <your sheet link>        # into the books, by someone in an approver group
 
-## How enforcement works (`src/sindarin/executor/core.py`, pure, no I/O)
+# in the terminal
+uv run sindarin ledger import --sheet <link>
+uv run sindarin ledger import --xlsx books.xlsx
+uv run sindarin ledger export-xlsx books.xlsx  # the whole ledger back out, one sheet per table
+# write-back of what the executors record, into tabs of the same sheet:
+SINDARIN_LEDGER_GOOGLE_SA=service-account.json
+```
 
-- **P4** the snapshot an approval binds to is read from the ledger (the basis month's actuals
-  for a budget, the payables' rows for a run, the recorded budget or the trial balance for the
-  entries, the price book for a deal) and from the executor's own record of the approved head
-  of the chain (the cap), never from the agent's fence.
+**5. Decide who approves.** A colleague by Mattermost username and the groups they approve
+for: the account is found or created, put in every room, and its participant id written into
+the policy, which the executors reload on their own. The limits sit next to the groups in
+`agents/policy/policy.yaml`: budget 10,000.00, payment run 10,000.00, discount 1,000.00 USD.
+
+```bash
+uv run sindarin people add alice --groups cfo,controllers
+uv run sindarin people list
+uv run sindarin people remove alice
+```
+
+In chat, `@sindarin-switch whoami` shows the id the policy names and the groups it is in.
+
+**6. See it in Switch.** In the Switch Console choose *Add a server* → *Connect to an existing
+server*, enter `http://localhost:8000`, and sign in as the Gateway admin. *Your Rooms* shows the
+four rooms with their agents, the "Acme finance" group and the documents a chain attaches. The
+Gateway at http://127.0.0.1:3000, same sign-in, lists the seven agents, the rooms and the
+Ecosystem page above. If the stack is ever recreated, sign in again.
+
+```bash
+grep -E '^GATEWAY_ADMIN_(EMAIL|PASSWORD)=' ~/.sindarin/switch-stack/.env
+```
+
+## Commands
+
+Agents answer to a mention in words; executors answer to a command. Ids are `GOALS-n`,
+`BUDGET-n`, `ENTRIES-n` for the plan, `CLOSE-n`, `PAY-n`, `LOCK-n` for the close and `DEAL-n`
+for sales. A bare mention of an executor returns its help.
+
+| Gate command | What happens | Answered by |
+|---|---|---|
+| `approve <id>` | checks the sender's group, the room, the TTL, single use and the live ledger, then acts and verifies; refusals name the reason, the amount and the limit | switch for `GOALS`, `CLOSE`; ledger for the rest |
+| `deny <id> [reason]` | closes the artifact; the proposer is told | the owner |
+| `changes <id> <note>` | asks the proposing agent to revise in the same thread | the owner |
+| `status [<id>]` | one artifact, or everything the executor holds | either |
+| `whoami` | your participant id and groups | either |
+| `board` | everything in flight across both executors | `sindarin-switch` |
+| `brief` | re-posts the room's opening brief | `sindarin-switch`, in a plan or period room |
+
+| Books command | What happens | Answered by |
+|---|---|---|
+| `sale <invoice> <amount> <customer>` | a late sale lands in the newest month with sales | `sindarin-ledger` |
+| `price <product> <amount>` | edits a list price in the price book | `sindarin-ledger` |
+| `load <link>` | the team's file into the books; open rows replaced, paid payables and locked months kept | `sindarin-ledger` |
+
+| Reading command | What happens | Answered by |
+|---|---|---|
+| `report <period>` | the month against its targets, the budget, the planned amounts, budget against actual, with the charts attached as PNGs | `sindarin-switch` |
+| `export <period> sales\|payables\|budget\|planned\|targets\|deals\|journal\|audit` | the table as a CSV file in the room | `sindarin-switch` |
+| `chart <period> revenue\|budget\|costs\|target\|deals` | a bar chart PNG in the room | `sindarin-switch` |
+| `read <link> [tab]` | any Google Sheet, Drive file, .xlsx or .csv: every tab, totals, date ranges, repeated invoices, missing columns, and whether the books can take it; with a tab, its rows | `sindarin-switch` |
+| `audit <id>\|<period>` | the trail, event by event, with the participant id behind each one | the owner; a month in `#acme-finance` covers both |
+| `who approves [<kind>]` | the group, the limit and the names, from the policy | either |
+
+Months may be named in the reading commands: `chart October revenue`, `report for November`,
+`audit october`. Approvals are exact, by design.
+
+## What an approval has to pass
+
+The executor core, `src/sindarin/executor/core.py`, is pure code with no I/O. These run in
+order on every `approve`:
+
+- **P4** the snapshot an approval binds to is read from the ledger and from the executor's own
+  record of the approved head of the chain, never from the agent's fence.
 - **A2** the sender's participant id must be in the group the rule names; for a budget, a
-  payment run or a deal the group is chosen on the total the executor read (the discount, for
-  a deal), so the limit decides who may say yes. **A3** agents and executors are refused
-  whatever they type, and the one who proposed never approves.
-- **A4** single use: the artifact must be `pending` and inside its TTL. **A5** the command must
+  payment run or a deal the group is chosen on the total the executor read, so the limit decides
+  who may say yes. **A3** agents and executors are refused whatever they type, and the one who
+  proposed never approves.
+- **A4** single use: the artifact must be pending and inside its TTL. **A5** the command must
   come from the rule's room. **A6** the ledger is re-read; if it moved, the approval is refused,
   the snapshot replaced and the agent asked to propose again.
 - **Order.** A budget follows approved goals, the entries a recorded budget; a payment run
-  follows an approved plan and names only its payables, the lock a paid run. The executors hand
-  the work on with one stage line each, posted once.
-- State goes to SQLite before any write; every action is verified by read-back; one retry.
-- One credential per executor: `sindarin-ledger` cannot touch Switch's Gateway, `sindarin-switch`
-  opens the ledger read-only for reports. The agents open it read-only too.
+  follows an approved plan and names only its payables, the lock a paid run.
+- State goes to SQLite before any write; every action is verified by read-back; one credential
+  per executor.
 
 ## Tests
 
@@ -274,10 +358,10 @@ Switch's real frame shape, and each writes a transcript to `validation/reports/`
 `src/sindarin/ledger.py` the ledger · `src/sindarin/sheets.py` Google Sheets and Excel ·
 `src/sindarin/reports.py` reports, exports and charts · `src/sindarin/workbook.py` any linked
 file, read and checked · `src/sindarin/people.py` colleagues into rooms and groups ·
-`src/sindarin/adapters/` the ledger,
-the Switch rooms and the Switch files adapters · `src/sindarin/agents/` the five roles on the
-Anthropic SDK and their stand-ins · `src/sindarin/switch/` the agent-protocol client and the
-Gateway client · `agents/<role>/AGENT.md` the prompts, `agents/policy/` the groups and rules ·
-`executor/` the two executor configs · `data/acme/` the sample month · `validation/` the eleven
-adversarial tests · `tests/unit/` · `scripts/` stack, demo, live checks and rehearsal ·
-`templates/` the Switch Console alternative.
+`src/sindarin/adapters/` the ledger, the Switch rooms and the Switch files adapters ·
+`src/sindarin/agents/` the five roles on the Anthropic SDK and their stand-ins ·
+`src/sindarin/switch/` the agent-protocol client and the Gateway client ·
+`agents/<role>/AGENT.md` the prompts, `agents/policy/` the groups and rules · `executor/` the two
+executor configs · `data/acme/` the sample month · `validation/` the eleven adversarial tests ·
+`tests/unit/` · `scripts/` stack, demo, walkthrough, rehearsal and reset · `templates/` the
+Switch Console template · `docs/` the landing page and the clips.

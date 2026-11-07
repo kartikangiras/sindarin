@@ -17,6 +17,7 @@ executor/*.db-journal
 executor/*.db-shm
 executor/*.db-wal
 executor/*.log
+data/
 
 # documentation stays local: only the READMEs and the agents' prompts are published
 *.md
